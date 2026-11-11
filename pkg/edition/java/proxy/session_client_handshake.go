@@ -245,6 +245,12 @@ type initialInbound struct {
 	netmc.MinecraftConn
 	virtualHost     net.Addr
 	handshakeIntent packet.HandshakeIntent
+	// remoteAddrOverride, when non-nil, replaces the peer address the
+	// embedded connection reports; see RemoteAddr. It is set once during the
+	// login window (union forwarded-remote-addr seam, session_client_auth.go
+	// Activated) on the connection's single read-loop goroutine, before any
+	// other goroutine can observe this connection, so a plain field is safe.
+	remoteAddrOverride net.Addr
 }
 
 var _ Inbound = (*initialInbound)(nil)
@@ -263,6 +269,20 @@ func (i *initialInbound) VirtualHost() net.Addr {
 
 func (i *initialInbound) setVirtualHost(addr net.Addr) {
 	i.virtualHost = addr
+}
+
+// setRemoteAddr overrides the remote address reported by RemoteAddr; nil
+// restores the connection's peer address. See remoteAddrOverride.
+func (i *initialInbound) setRemoteAddr(addr net.Addr) { i.remoteAddrOverride = addr }
+
+// RemoteAddr returns the inbound's remote address: the forwarded client
+// address when one was applied during login (union forwarded-remote-addr
+// seam), otherwise the peer address of the underlying connection.
+func (i *initialInbound) RemoteAddr() net.Addr {
+	if i.remoteAddrOverride != nil {
+		return i.remoteAddrOverride
+	}
+	return i.MinecraftConn.RemoteAddr()
 }
 
 func (i *initialInbound) HandshakeIntent() packet.HandshakeIntent {

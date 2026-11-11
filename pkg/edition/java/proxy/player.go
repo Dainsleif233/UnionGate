@@ -168,6 +168,13 @@ type connectedPlayer struct {
 
 	serversToTry []string // names of servers to try if we got disconnected from previous
 	tryIndex     int
+
+	// remoteAddrOverride, when non-nil, replaces the peer address the
+	// embedded connection reports; see RemoteAddr. It is set once during
+	// login (union forwarded-remote-addr seam, session_client_auth.go
+	// Activated) on the connection's single read-loop goroutine before the
+	// player is published to any other goroutine, so a plain field is safe.
+	remoteAddrOverride net.Addr
 }
 
 var _ Player = (*connectedPlayer)(nil)
@@ -210,6 +217,20 @@ func newConnectedPlayer(
 }
 
 func (p *connectedPlayer) IdentifiedKey() crypto.IdentifiedKey { return p.playerKey }
+
+// setRemoteAddr overrides the remote address reported by RemoteAddr; nil
+// restores the connection's peer address. See remoteAddrOverride.
+func (p *connectedPlayer) setRemoteAddr(addr net.Addr) { p.remoteAddrOverride = addr }
+
+// RemoteAddr returns the player's remote address: the forwarded client
+// address when one was applied during login (union forwarded-remote-addr
+// seam), otherwise the peer address of the underlying connection.
+func (p *connectedPlayer) RemoteAddr() net.Addr {
+	if p.remoteAddrOverride != nil {
+		return p.remoteAddrOverride
+	}
+	return p.MinecraftConn.RemoteAddr()
+}
 
 // BossBarManager returns the player's boss bar manager.
 // It is used to handle proxy-level boss bars during server transitions on 1.20.2+.

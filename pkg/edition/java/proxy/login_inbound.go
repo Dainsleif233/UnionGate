@@ -82,6 +82,12 @@ func (l *loginInboundConn) HandshakeIntent() packet.HandshakeIntent {
 
 func (l *loginInboundConn) RemoteAddr() net.Addr { return l.delegate.RemoteAddr() }
 
+// setRemoteAddr overrides the remote address reported by RemoteAddr; nil
+// restores the connection's peer address. The override lives on the
+// delegate initialInbound (see its RemoteAddr), which owns the single
+// login-window write site in session_client_auth.go.
+func (l *loginInboundConn) setRemoteAddr(addr net.Addr) { l.delegate.setRemoteAddr(addr) }
+
 func (l *loginInboundConn) Active() bool { return l.delegate.Active() }
 
 func (l *loginInboundConn) IdentifiedKey() crypto.IdentifiedKey { return l.playerKey }

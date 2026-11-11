@@ -103,6 +103,10 @@ func (b *backendPlaySessionHandler) HandlePacket(pc *proto.PacketContext) {
 		b.handleCookieStore(p)
 	case *cookie.CookieRequest:
 		b.handleCookieRequest(p)
+	case *packet.JoinGame:
+		b.handleDimensionRewrite(pc, p)
+	case *packet.Respawn:
+		b.handleDimensionRewrite(pc, p)
 	default:
 		b.forwardToPlayer(pc, nil)
 	}
@@ -532,6 +536,20 @@ func (b *backendPlaySessionHandler) handleCookieRequest(p *cookie.CookieRequest)
 		return
 	}
 	forwardCookieRequest(e, b.serverConn.player)
+}
+
+// handleDimensionRewrite applies the union dimension seam (MappedDimensionName
+// port) to backend JoinGame/Respawn packets. Rewriting mutates the decoded
+// struct, so a changed packet must be re-encoded via WritePacket; unchanged
+// packets keep the zero-copy raw-payload fast path.
+func (b *backendPlaySessionHandler) handleDimensionRewrite(pc *proto.PacketContext, p proto.Packet) {
+	if UnionDimensionRewrite != nil {
+		if UnionDimensionRewrite(b.serverConn.player.ID(), p) {
+			_ = b.serverConn.player.WritePacket(p)
+			return
+		}
+	}
+	b.forwardToPlayer(pc, nil)
 }
 
 // prefer PacketContext over Packet

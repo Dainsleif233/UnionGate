@@ -98,6 +98,18 @@ func (a *authSessionHandler) Activated() {
 	}
 	gameProfile = profileRequest.GameProfile()
 
+	// Union forwarded-remote-addr seam (union_seams.go): the proxied-proxy
+	// plugin records the client address an upstream entry forwarded for this
+	// username in its GameProfileRequestEvent handler (fired above) and
+	// deletes it at PostLoginEvent, so the lookup must happen here. Apply it
+	// to the inbound connection and, below, to the connected player, so
+	// downstream forwarding/logging/permission decisions report the
+	// forwarded address instead of the proxied-proxy tunnel address.
+	forwardedRemoteAddr := unionForwardedRemoteAddr(profileRequest.Original().Name, a.log)
+	if forwardedRemoteAddr != nil {
+		a.inbound.setRemoteAddr(forwardedRemoteAddr)
+	}
+
 	// Initiate a regular connection and move over to it.
 	player := newConnectedPlayer(
 		conn,
@@ -109,6 +121,9 @@ func (a *authSessionHandler) Activated() {
 		a.sessionHandlerDeps,
 	)
 	a.connectedPlayer = player
+	if forwardedRemoteAddr != nil {
+		player.setRemoteAddr(forwardedRemoteAddr)
+	}
 	if !a.registrar.canRegisterConnection(player) {
 		player.Disconnect(alreadyConnected)
 		return

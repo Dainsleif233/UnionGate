@@ -507,6 +507,12 @@ func (c *clientPlaySessionHandler) handleBackendJoinGame(pc *proto.PacketContext
 	if !ok {
 		return errors.New("no backend server connection")
 	}
+	// Union dimension seam: rewrite the first JoinGame at entry so the
+	// BufferPacket/doFast/doSafe paths below re-encode the rewritten struct
+	// (including the fast-switch synthetic Respawn derived from it).
+	if UnionDimensionRewrite != nil {
+		UnionDimensionRewrite(c.player.ID(), joinGame)
+	}
 	playerVersion := c.player.Protocol()
 	if c.spawned.CompareAndSwap(false, true) {
 		// The player wasn't spawned in yet, so we don't need to do anything special.

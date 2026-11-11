@@ -56,6 +56,38 @@ require (
 )
 
 require (
+	github.com/Azure/go-ntlmssp v0.1.1 // indirect
+	github.com/armon/go-socks5 v0.0.0-20160902184237-e75332964ef5 // indirect
+	github.com/coreos/go-oidc/v3 v3.21.0 // indirect
+	github.com/fatedier/golib v0.8.2 // indirect
+	github.com/fatedier/yamux v0.3.0 // indirect
+	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
+	github.com/gorilla/mux v1.8.1 // indirect
+	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/klauspost/cpuid/v2 v2.2.6 // indirect
+	github.com/klauspost/reedsolomon v1.12.0 // indirect
+	github.com/pkg/errors v0.9.1 // indirect
+	github.com/quic-go/quic-go v0.65.0 // indirect
+	github.com/samber/lo v1.53.0 // indirect
+	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8 // indirect
+	github.com/spf13/cobra v1.10.2 // indirect
+	github.com/tjfoc/gmsm v1.4.1 // indirect
+	github.com/vishvananda/netlink v1.3.1 // indirect
+	github.com/vishvananda/netns v0.0.5 // indirect
+	github.com/xtaci/kcp-go/v5 v5.6.73 // indirect
+	go.yaml.in/yaml/v2 v2.4.4 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
+	golang.org/x/oauth2 v0.37.0 // indirect
+	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
+	golang.zx2c4.com/wireguard v0.0.0-20261024220952-b3bc704ef0ee // indirect
+	gopkg.in/ini.v1 v1.67.3 // indirect
+	k8s.io/apimachinery v0.37.2 // indirect
+	k8s.io/utils v0.0.0-20261023123148-ca04ba58ecab // indirect
+	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
+	sigs.k8s.io/yaml v1.6.0 // indirect
+)
+
+require (
 	buf.build/gen/go/minekube/connect/protocolbuffers/go v1.36.10-20240220124425-904ce30425c9.1 // indirect
 	connectrpc.com/connect/v2 v2.0.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
@@ -64,6 +96,7 @@ require (
 	github.com/cpuguy83/go-md2man/v2 v2.0.7 // indirect
 	github.com/ebitengine/purego v0.11.1 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect
+	github.com/fatedier/frp v0.72.0
 	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/francoispqt/gojay v1.2.13 // indirect
 	github.com/go-gl/mathgl v1.1.0 // indirect
@@ -76,7 +109,7 @@ require (
 	github.com/lucasb-eyer/go-colorful v1.4.0 // indirect
 	github.com/lufia/plan9stats v0.0.0-20250827001030-24949be3fa54 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/pelletier/go-toml/v2 v2.2.4 // indirect
+	github.com/pelletier/go-toml/v2 v2.4.3 // indirect
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
 	github.com/prometheus/common v0.72.0 // indirect
 	github.com/prometheus/procfs v0.22.0 // indirect
@@ -109,8 +142,10 @@ require (
 	go.uber.org/multierr v1.11.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/image v0.46.0 // indirect
-	golang.org/x/net v0.61.0 // indirect
+	golang.org/x/net v0.62.0 // indirect
 	golang.org/x/sys v0.49.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260819154853-08b0e4226688 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260819154853-08b0e4226688 // indirect
 )
+
+replace github.com/fatedier/frp => ./third_party/frp

@@ -31,6 +31,8 @@ import (
 	"go.minekube.com/gate/pkg/internal/otelutil"
 	"go.minekube.com/gate/pkg/internal/reload"
 	"go.minekube.com/gate/pkg/runtime/process"
+	"go.minekube.com/gate/pkg/union"
+	"go.minekube.com/gate/pkg/union/frps"
 	connectcfg "go.minekube.com/gate/pkg/util/connectutil/config"
 	errorsutil "go.minekube.com/gate/pkg/util/errs"
 	"go.minekube.com/gate/pkg/util/eventmgr"
@@ -47,6 +49,10 @@ type Options struct {
 	// The config file path for persistence.
 	// If none is set, config persistence will be disabled.
 	ConfigFilePath string
+	// Log is the base logger for Gate and its wired union plugins.
+	// If unset (nil sink), a discard logger is used and behavior is
+	// identical to Wire (plugins log nothing).
+	Log logr.Logger
 }
 
 // New returns a new Gate instance.
@@ -101,11 +107,48 @@ func New(options Options) (gate *Gate, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("error creating new %s proxy: %w", edition.Java, err)
 	}
+
+	// Wire union plugins synchronously BEFORE any runnable is added:
+	// process.Collection starts runnables concurrently, so wiring here is the
+	// only ordering point. In particular the MUA frp server plugin must be
+	// queued before the frps service drains the queue at its Run entry, and
+	// routing/login subscriptions must exist before the proxy serves.
+	// The logger comes from Options (Start passes the request logger); a
+	// missing logger keeps the old discard behavior.
+	if err = union.WireWithLogger(gate.javaProxy, c, options.Log); err != nil {
+		return nil, fmt.Errorf("error wiring union plugins: %w", err)
+	}
+
 	if err = gate.proc.Add(process.RunnableFunc(func(ctx context.Context) error {
 		ctx = logr.NewContext(ctx, logr.FromContextOrDiscard(ctx).WithName("java"))
 		return gate.javaProxy.Start(ctx)
 	})); err != nil {
 		return nil, err
+	}
+
+	if c.Frps.Enabled {
+		frpsService, err := frps.NewService(frps.Config{
+			Enabled:      c.Frps.Enabled,
+			BindAddr:     c.Frps.BindAddr,
+			BindPort:     c.Frps.BindPort,
+			KCPBindPort:  c.Frps.KCPBindPort,
+			QUICBindPort: c.Frps.QUICBindPort,
+			Token:        c.Frps.Token,
+			AllowPorts:   c.Frps.AllowPorts,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("error creating frps service: %w", err)
+		}
+		if err = gate.proc.Add(process.RunnableFunc(func(ctx context.Context) error {
+			ctx = logr.NewContext(ctx, logr.FromContextOrDiscard(ctx).WithName("frps"))
+			// No ordering delay needed: union.Wire already queued the
+			// in-process frp server plugins before any runnable was added,
+			// so the queue drain at Run entry sees all of them.
+			frpsService.Run(ctx)
+			return nil
+		})); err != nil {
+			return nil, err
+		}
 	}
 
 	if c.Config.Bedrock.Enabled {
@@ -422,6 +465,7 @@ func Start(ctx context.Context, opts ...StartOption) error {
 		Config:         c.conf,
 		EventMgr:       eventMgr,
 		ConfigFilePath: c.autoConfigReloadWatchPath,
+		Log:            log,
 	})
 	if err != nil {
 		return fmt.Errorf("error creating Gate instance: %w", err)

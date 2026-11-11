@@ -535,3 +535,69 @@ api:
   # The bind address to listen for API connections.
   # Default: localhost:8080
   bind: localhost:8080
+
+# Embedded frp server (frps): lets remote frpc clients tunnel their backend
+# servers to this Gate. Tunnels are routed by the union plugins below.
+# In Lite mode (lite.enabled: true) frps still binds, but tunneled backends
+# never receive player connections because Lite only routes via lite.routes.
+frps:
+  # Whether to start the embedded frps server.
+  # Default: false
+  enabled: false
+  # The address frps binds for frpc control-plane connections.
+  # Default: 0.0.0.0
+  bindAddr: 0.0.0.0
+  # The TCP port frps binds for frpc control-plane connections.
+  # Default: 7001
+  bindPort: 7001
+  # The UDP port for frpc connections over KCP. Disabled when unset.
+  # Default: 7002
+  kcpBindPort: 7002
+  # The UDP port for frpc connections over QUIC. Disabled when unset.
+  # Default: 7003
+  quicBindPort: 7003
+  # The authentication token frpc clients must send. Empty allows any frpc
+  # that can reach the bind address to open tunnels.
+  #token: secret_here
+  # The remote ports frpc clients may bind, e.g. "10000-19999".
+  # Empty allows all ports.
+  # Default: 10000-19999
+  allowPorts: 10000-19999
+
+# Union plugins: in-process frp plugins and forwarding/dimension integrations
+# wired into the Java proxy. mua requires frps.enabled: true.
+union:
+  # MUA (multi-user access) registers a dynamic backend on the proxy for every
+  # frpc tunnel connecting to frps.
+  mua:
+    # Whether to enable the MUA control plane.
+    # Default: false
+    enabled: false
+    # The address frps advertises to frpc clients for the MUA control plane.
+    # Default: 127.0.0.1
+    #frpAddress: 127.0.0.1
+    # Limits the remote ports an frpc may bind to the [allowMin, allowMax]
+    # range; disabled, frps.allowPorts governs.
+    # Default: false
+    #restrictPort: false
+    #allowMin: 10000
+    #allowMax: 19999
+  # Signed packet forwarding between chained Gate entries (proxied-proxy).
+  proxiedProxy:
+    # Options: DISABLED, ENTRY, PROXY, ENTRY_AND_PROXY
+    # Default: DISABLED
+    role: DISABLED
+  # Rewrites dimension packets for mod setups that require it.
+  dimension:
+    # Default: false
+    enabled: false
+  # Bridges map mod channels (Xaero's minimap/world map, world-info).
+  mapMod:
+    # Default: false
+    enabled: false
+    # Channels to intercept; empty uses the upstream default channel set.
+    #channels: []
+    # Also forwards matched player messages to the backend after tracking
+    # world ids.
+    # Default: false
+    #forwardToBackend: false

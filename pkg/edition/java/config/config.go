@@ -457,6 +457,9 @@ func validateOfflineModeUsernameBlacklist(c *Config, e func(string, ...any)) {
 // part in login, player info forwarding, compression or answering status requests. Accepting
 // these settings without a word is the cause of https://github.com/minekube/gate/issues/929.
 // Settings left at their default are not reported, only ones an operator deliberately set.
+//
+// Root-level settings this package cannot see (frps, union plugins) are warned
+// about separately in pkg/gate/config.Config.Validate.
 func warnLiteIgnoredSettings(c *Config, w func(string, ...any)) {
 	f := c.Forwarding
 	forwardingConfigured := f.VelocitySecret != "" || f.BungeeGuardSecret != ""

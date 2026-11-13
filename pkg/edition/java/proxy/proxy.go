@@ -58,6 +58,12 @@ type Proxy struct {
 
 	startTime atomic.Pointer[time.Time]
 
+	// pingPassthrough resolves a backend server list status for full mode.
+	// It is nil by default; union.Wire installs a resolver that first consults
+	// the MUA plugin's dynamic forced hosts and falls back to Gate's static
+	// forced hosts / try list.
+	pingPassthrough atomic.Pointer[PingPassthroughFunc]
+
 	closeMu     sync.Mutex
 	startCtx    context.Context
 	cancelStart context.CancelFunc

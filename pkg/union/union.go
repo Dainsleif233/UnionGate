@@ -16,16 +16,21 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/go-logr/logr"
 
+	"go.minekube.com/gate/pkg/edition/java/lite"
+	"go.minekube.com/gate/pkg/edition/java/ping"
 	jproxy "go.minekube.com/gate/pkg/edition/java/proxy"
 	"go.minekube.com/gate/pkg/gate/config"
+	gproto "go.minekube.com/gate/pkg/gate/proto"
 	"go.minekube.com/gate/pkg/union/dimension"
 	"go.minekube.com/gate/pkg/union/frps"
 	"go.minekube.com/gate/pkg/union/mapmod"
 	"go.minekube.com/gate/pkg/union/mua"
 	"go.minekube.com/gate/pkg/union/proxiedproxy"
+	"go.minekube.com/gate/pkg/util/netutil"
 	"go.minekube.com/gate/pkg/util/uuid"
 )
 
@@ -82,6 +87,7 @@ func WireWithLogger(javaProxy *jproxy.Proxy, cfg *config.Config, log logr.Logger
 	// mua requires the frps library service; config.Validate already rejects
 	// mua.enabled with frps disabled, and the second check here keeps Wire
 	// safe for callers that bypass validation.
+	var muaCore *mua.Plugin
 	if cfg.Frps.Enabled && cfg.Union.Mua.Enabled {
 		muaCfg := mua.Config{
 			FrpAddress:   cfg.Union.Mua.FrpAddress,
@@ -90,6 +96,7 @@ func WireWithLogger(javaProxy *jproxy.Proxy, cfg *config.Config, log logr.Logger
 			AllowMax:     cfg.Union.Mua.AllowMax,
 		}
 		core := mua.NewCoreForProxyWithLogger(javaProxy, muaCfg, log)
+		muaCore = core
 		// Queue BEFORE the process collection starts: frps drains the queue
 		// at Run entry and Run cannot start earlier than proc.Start, which
 		// is only called after Wire returns.
@@ -151,6 +158,29 @@ func WireWithLogger(javaProxy *jproxy.Proxy, cfg *config.Config, log logr.Logger
 			mapCfg = mapmod.DefaultConfig()
 		}
 		mapmod.NewPluginWithLogger(javaProxy, mapCfg, log)
+	}
+
+	// --- full-mode ping passthrough ------------------------------------------
+	// status.pingPassthrough: all|mods resolves the status of the member
+	// server behind the requested host. MUA's forced hosts are dynamic, so
+	// they must win over the static config map; fall back to the standard
+	// static forced-host/try resolver for every other host.
+	if muaCore != nil {
+		javaProxy.SetPingPassthroughResolver(func(
+			ctx context.Context,
+			p *jproxy.Proxy,
+			inbound jproxy.Inbound,
+			protocol gproto.Protocol,
+		) (*ping.ServerPing, error) {
+			if inbound != nil && inbound.VirtualHost() != nil {
+				host := strings.ToLower(netutil.HostStr(
+					lite.ClearVirtualHost(inbound.VirtualHost().String())))
+				if servers := muaCore.ForcedHostServers(host); len(servers) > 0 {
+					return jproxy.ResolvePingPassthroughServers(ctx, p, servers, inbound, protocol)
+				}
+			}
+			return p.ResolvePingPassthroughDefault(ctx, inbound, protocol)
+		})
 	}
 
 	return errors.Join(errs...)

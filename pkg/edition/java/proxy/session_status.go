@@ -1,11 +1,13 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"syscall"
 
 	"github.com/go-logr/logr"
@@ -111,6 +113,40 @@ func newInitialPing(p *Proxy, protocol proto.Protocol) *ping.ServerPing {
 	}
 }
 
+// resolveInitialPing builds the response used in full mode. With
+// status.pingPassthrough enabled it asks the configured backend for its
+// status and either returns it wholesale ("all") or only copies its mod
+// metadata onto Gate's local status ("mods"). Any resolution error falls back
+// to the local status so an unavailable backend never breaks the server list.
+func (h *statusSessionHandler) resolveInitialPing(protocol proto.Protocol) *ping.ServerPing {
+	local := newInitialPing(h.proxy, protocol)
+	mode := strings.ToLower(strings.TrimSpace(h.config().Status.PingPassthrough))
+	if mode == "" || mode == "disabled" {
+		return local
+	}
+	if h.inbound == nil {
+		return local
+	}
+	ctx := h.inbound.Context()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	backend, err := h.proxy.resolvePingPassthrough(ctx, h.inbound, protocol)
+	if err != nil {
+		h.log.V(1).Info("ping passthrough failed, using local status", "error", err)
+		return local
+	}
+	if backend == nil {
+		return local
+	}
+	if mode == "mods" {
+		local.ModInfo = backend.ModInfo
+		local.Extra = backend.Extra
+		return local
+	}
+	return backend
+}
+
 func (h *statusSessionHandler) handleStatusRequest(pc *proto.PacketContext) {
 	if h.receivedRequest {
 		// Already sent response
@@ -125,7 +161,7 @@ func (h *statusSessionHandler) handleStatusRequest(pc *proto.PacketContext) {
 
 	log := h.log
 	if h.resolvePingResponse == nil {
-		e.ping = newInitialPing(h.proxy, pc.Protocol)
+		e.ping = h.resolveInitialPing(pc.Protocol)
 	} else {
 		var err error
 		var res *packet.StatusResponse

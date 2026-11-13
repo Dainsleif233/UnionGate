@@ -605,3 +605,23 @@ func TestParseStringList(t *testing.T) {
 		}
 	}
 }
+
+func TestForcedHostServersCopiesAndLowercases(t *testing.T) {
+	p := NewCore(&fakeRegistry{}, Config{})
+	p.mu.Lock()
+	p.forcedHosts["play.example.com"] = []string{"lobby", "survival"}
+	p.mu.Unlock()
+
+	got := p.ForcedHostServers("PLAY.Example.COM")
+	if len(got) != 2 || got[0] != "lobby" || got[1] != "survival" {
+		t.Fatalf("ForcedHostServers = %v, want [lobby survival]", got)
+	}
+	got[0] = "mutated"
+	again := p.ForcedHostServers("play.example.com")
+	if again[0] != "lobby" {
+		t.Fatalf("ForcedHostServers returned a shared slice: %v", again)
+	}
+	if p.ForcedHostServers("missing.example.com") != nil {
+		t.Fatal("expected nil for unknown host")
+	}
+}

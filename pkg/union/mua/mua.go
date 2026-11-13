@@ -370,6 +370,17 @@ func (p *Plugin) forcedHostList(host string) []string {
 	return slices.Clone(hosts)
 }
 
+// ForcedHostServers returns a copy of the server names routed for the given
+// virtual host. It is used by the full-mode ping passthrough resolver so a
+// server list ping for a member domain asks that member's Velocity for its
+// status instead of the union entry's static status.
+func (p *Plugin) ForcedHostServers(host string) []string {
+	if p == nil {
+		return nil
+	}
+	return p.forcedHostList(host)
+}
+
 // parseStringList parses a metas value as a JSON array of strings, tolerating
 // a single (quoted) string value.
 func parseStringList(v string) ([]string, error) {

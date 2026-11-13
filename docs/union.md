@@ -73,19 +73,33 @@ remote_port = 10001
 
 ### 3.2 proxiedproxy（ENTRY↔PROXY 链式转发）
 
+对外提供域名、玩家从你这里 `/server` 进成员服的入口必须是 **ENTRY**；成员自己的 Velocity（接受入口连接的代理）是 **PROXY**。两者不能填反：入口填 PROXY/不填时，成员 PROXY 发来的 `proxied-proxy:login` 没人应答，核心回 `Success:false`，成员直接断开，日志只会显示 `BungeeCord IP forwarding` 的通用错误。
+
 ```yaml
+# 对外入口（UnionEntryDocker 的替代）
 union:
   proxiedProxy:
-    role: PROXY   # DISABLED | ENTRY | PROXY | ENTRY_AND_PROXY
-    # ENTRY 必填：entryId + verificationType(RSA|KEY)；KEY 时必填 key
-    #entryId: entry-1
-    #verificationType: RSA
-    #privateKeyPath / publicKeyPath / entryJsonPath（ENTRY 密钥与 entry.json）
-    #trustedEntriesPath（PROXY 的 TrustedEntries.json，缺失自动写 [] 模板）
-    #allowClientConnection: false  # PROXY 是否放行直连客户端
+    role: ENTRY
+    entryId: "<你的 UNION_ENTRY_ID>"
+    verificationType: RSA
+    # 复用旧 UnionEntryDocker 的密钥，成员的 TrustedEntries.json 才继续认你
+    privateKeyPath: PrivateKey.pem
+    publicKeyPath: PublicKey.pem
+    entryJsonPath: entry.json
+    serverCommandAlias: hub   # 原插件默认 hub；填 none 关闭
 ```
 
-- ENTRY 启动自动生成/加载 RSA3072（`PrivateKey.pem 0600` + `PublicKey.pem` + `entry.json`），重启不轮换（D 值比对）。
+```yaml
+# 成员服自己的 Velocity（接受入口连接）
+union:
+  proxiedProxy:
+    role: PROXY
+    trustedEntriesPath: TrustedEntries.json  # 放入入口的 entry.json
+    #allowClientConnection: false
+```
+
+- ENTRY 启动自动生成/加载 RSA3072（`PrivateKey.pem 0600` + `PublicKey.pem` + `entry.json`），重启不轮换（D 值比对）。**换入口时必须复用旧 `PrivateKey.pem`/`entry.json`**；新密钥需要把新 `entry.json` 发给每个成员 PROXY 更新 `TrustedEntries.json`，否则验签失败。
+- 入口 ENTRY 的 profile 序列化必须与 Java 逐字节兼容：`id` 用带连字符 UUID 且同时带 `undashedId`，JSON 按 Gson HTML-safe 转义（`< > & = '` → `\uXXXX`）。base64 皮肤值里的 `=` 若未转义，成员 PROXY 端 `profile.toString()` 会变成 `\u003d`，RSA 验签必然失败。
 - PROXY 对上游 ENTRY `PreLogin` 发 `proxied-proxy:login/forward` 并强制离线鉴权；Verify 通过则 `GameProfileRequest` 换 profile + 记 forwardedAddr（登录窗口内生效，`PostLogin` 清理），失败记 `ok:false` 走 `PostLogin` 断开（坏包不再 panic，见 m02734 修）。
 - `SendV1Verification` 仅为配置兼容保留，未实现（V1 签的是 Java GameProfile toString，无可移植定义）。
 

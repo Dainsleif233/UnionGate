@@ -583,10 +583,29 @@ union:
     #allowMin: 10000
     #allowMax: 19999
   # Signed packet forwarding between chained Gate entries (proxied-proxy).
+  # The public union entry uses ENTRY: it answers the forwarding requests sent
+  # by member PROXY servers. A member proxy that accepts entry connections uses
+  # PROXY; ENTRY_AND_PROXY does both.
   proxiedProxy:
     # Options: DISABLED, ENTRY, PROXY, ENTRY_AND_PROXY
     # Default: DISABLED
     role: DISABLED
+    # ENTRY only: alias for the builtin /server command (the original
+    # ProxiedProxy default is "hub"). Set to "none" to disable.
+    #serverCommandAlias: hub
+    # ENTRY only: unique id of this entry, as registered with the union.
+    #entryId: ""
+    # ENTRY only: RSA (default) or KEY.
+    #verificationType: RSA
+    # ENTRY key/trust files. Reuse the files from the previous entry so the
+    # downstream PROXYs' TrustedEntries.json keeps trusting this entry.
+    #privateKeyPath: PrivateKey.pem
+    #publicKeyPath: PublicKey.pem
+    #entryJsonPath: entry.json
+    # PROXY only: trusted entries file.
+    #trustedEntriesPath: TrustedEntries.json
+    # PROXY only: allow direct clients instead of refusing them.
+    #allowClientConnection: false
   # Rewrites dimension packets for mod setups that require it.
   dimension:
     # Default: false

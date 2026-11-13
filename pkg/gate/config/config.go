@@ -129,6 +129,10 @@ type ProxiedProxyConfig struct {
 	// EntryID uniquely identifies this entry among the PROXY's trusted
 	// entries. Required for ENTRY roles.
 	EntryID string `json:"entryId,omitempty" yaml:"entryId,omitempty"`
+	// ServerCommandAlias exposes the builtin /server command under this name
+	// for ENTRY roles. Empty defaults to "hub" (the original ProxiedProxy
+	// default); "none" or "off" disables the alias.
+	ServerCommandAlias string `json:"serverCommandAlias,omitempty" yaml:"serverCommandAlias,omitempty"`
 	// VerificationType selects how packets are authenticated: "RSA" or
 	// "KEY". Required for ENTRY roles.
 	VerificationType string `json:"verificationType,omitempty" yaml:"verificationType,omitempty"`
@@ -268,6 +272,19 @@ func (c *Config) Validate() (warns []error, errs []error) {
 	// disabled).
 	errs2 = c.Union.validate(c.Frps.Enabled)
 	errs = append(errs, prefix("union", errs2)...)
+
+	// A configured entryId with the plugin disabled is almost always a
+	// deployment mistake: downstream PROXYs still send proxied-proxy:login,
+	// the core answers Success:false because nobody subscribes, and the
+	// member closes the login with the generic legacy-forwarding error.
+	if c.Union.ProxiedProxy.EntryID != "" {
+		role := c.Union.ProxiedProxy.Role
+		if role == "" || role == "DISABLED" {
+			w("union.proxiedProxy.entryId is set but role is disabled; " +
+				"downstream PROXYs will not receive forwarding data and member logins will fail. " +
+				"Set union.proxiedProxy.role to ENTRY on the public entry")
+		}
+	}
 
 	// Lite mode pipes player connections through unchanged, so the embedded
 	// frps server and the union plugins cannot influence how players are

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,8 +19,15 @@ const serverCmdPermission = "gate.command.server"
 
 // command to list and connect to registered servers
 func newServerCmd(proxy *Proxy) brigodier.LiteralNodeBuilder {
+	return newServerCmdNamed(proxy, "server")
+}
+
+// newServerCmdNamed builds the /server command under an arbitrary root literal.
+// The ProxiedProxy ENTRY uses it to expose the same command as /hub (or the
+// operator-configured entry.server-command-alias).
+func newServerCmdNamed(proxy *Proxy, name string) brigodier.LiteralNodeBuilder {
 	const serverNameArg = "name"
-	return brigodier.Literal("server").
+	return brigodier.Literal(name).
 		Requires(hasCmdPerm(proxy, serverCmdPermission)).
 		// List registered server.
 		Executes(command.Command(func(c *command.Context) error {
@@ -39,6 +47,26 @@ func newServerCmd(proxy *Proxy) brigodier.LiteralNodeBuilder {
 				return connectPlayersToServer(c, proxy, name, player)
 			})),
 		)
+}
+
+// RegisterServerCommandAlias exposes the builtin /server command under another
+// root name (for example the ProxiedProxy ENTRY alias "hub"). The alias is a
+// full command node with the same permission, executor and suggestions, so it
+// behaves exactly like /server. Empty, "server", "none" and "off" are no-ops.
+//
+// The alias must be registered before the proxy starts serving; the ENTRY
+// plugin does this during Init.
+func (p *Proxy) RegisterServerCommandAlias(alias string) error {
+	alias = strings.ToLower(strings.TrimSpace(alias))
+	switch alias {
+	case "", "server", "none", "off":
+		return nil
+	}
+	if p.command.Has(alias) {
+		return nil
+	}
+	p.command.Register(newServerCmdNamed(p, alias))
+	return nil
 }
 
 func connectPlayersToServer(c *command.Context, proxy *Proxy, serverName string, players ...Player) error {

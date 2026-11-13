@@ -13,6 +13,7 @@
 package proxiedproxy
 
 import (
+	"bytes"
 	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/json"
@@ -63,8 +64,9 @@ type Verification struct {
 type Forwarding struct {
 	VHost         string `json:"vHost"`
 	RemoteAddress string `json:"remoteAddress"`
-	// Profile is the game profile JSON embedded verbatim: its exact bytes are
-	// part of the signed body, so they must never be re-marshaled.
+	// Profile is the game profile JSON embedded verbatim. The wire bytes may
+	// be HTML-safe escaped by a Java ENTRY; the signed body uses the unescaped
+	// form produced by Gson's JsonObject.toString() (see SignBody).
 	Profile      json.RawMessage `json:"profile"`
 	Timestamp    int64           `json:"timestamp"` // unix milliseconds
 	EntryID      string          `json:"entryId,omitempty"`
@@ -72,19 +74,77 @@ type Forwarding struct {
 }
 
 // SignBody returns the exact byte string a packet is signed or hashed over:
-// vHost + remoteAddress + profile JSON (verbatim) + timestamp [+ entryId].
+// vHost + remoteAddress + profile JSON + timestamp [+ entryId].
 //
-// Java ForwardingParser.getSignBody().
+// Java ForwardingParser.getSignBody() uses profile.toString(). Gson serializes
+// a Java ENTRY's wire packet with HTML-safe escaping, but JsonObject.toString()
+// re-serializes with htmlSafe=false before signing, so the signature covers the
+// unescaped form. gsonCanonicalProfile reproduces that form for both our own
+// packets and packets produced by a Java ENTRY.
 func (f *Forwarding) SignBody() []byte {
 	var b strings.Builder
 	b.WriteString(f.VHost)
 	b.WriteString(f.RemoteAddress)
-	b.Write(f.Profile)
+	b.Write(gsonCanonicalProfile(f.Profile))
 	b.WriteString(strconv.FormatInt(f.Timestamp, 10))
 	if f.EntryID != "" {
 		b.WriteString(f.EntryID)
 	}
 	return []byte(b.String())
+}
+
+// gsonHTMLSafeEscapes maps the five ASCII characters Gson's default HTML-safe
+// JsonWriter escapes. JsonObject.toString() writes them raw, so a Java
+// signature is always computed over the unescaped form.
+var gsonHTMLSafeEscapes = map[string]byte{
+	"003d": '=',
+	"0027": '\'',
+	"003c": '<',
+	"003e": '>',
+	"0026": '&',
+}
+
+// gsonCanonicalProfile converts a profile JSON object to the form Gson's
+// JsonObject.toString() produces: compact and with the five HTML-safe escapes
+// unescaped inside strings. It deliberately touches only string contents so the
+// JSON structure and member order (which is part of the signed body) are
+// preserved.
+func gsonCanonicalProfile(raw []byte) []byte {
+	if !bytes.Contains(raw, []byte(`\u00`)) {
+		return raw
+	}
+	out := make([]byte, 0, len(raw))
+	inString := false
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if !inString {
+			out = append(out, c)
+			if c == '"' {
+				inString = true
+			}
+			continue
+		}
+		if c == '\\' {
+			if i+5 < len(raw) && raw[i+1] == 'u' {
+				if r, ok := gsonHTMLSafeEscapes[string(raw[i+2:i+6])]; ok {
+					out = append(out, r)
+					i += 5
+					continue
+				}
+			}
+			out = append(out, c)
+			if i+1 < len(raw) {
+				out = append(out, raw[i+1])
+				i++
+			}
+			continue
+		}
+		out = append(out, c)
+		if c == '"' {
+			inString = false
+		}
+	}
+	return out
 }
 
 // NewForwarding assembles and signs a forwarding packet as an ENTRY would,

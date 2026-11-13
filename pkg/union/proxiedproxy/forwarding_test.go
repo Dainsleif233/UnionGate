@@ -459,24 +459,6 @@ func TestProfileName(t *testing.T) {
 	}
 }
 
-func TestMarshalNoEscape(t *testing.T) {
-	// HTML-sensitive characters must survive unescaped: the profile bytes are
-	// embedded verbatim in the signed body and Gson does not escape them.
-	raw := json.RawMessage(`{"name":"A<B&"}`)
-	b, err := marshalNoEscape(&struct {
-		Profile json.RawMessage `json:"profile"`
-	}{Profile: raw})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(b, []byte(`A<B&`)) {
-		t.Errorf("marshalNoEscape escaped HTML: %s", b)
-	}
-	if bytes.HasSuffix(b, []byte("\n")) {
-		t.Error("marshalNoEscape left a trailing newline")
-	}
-}
-
 func TestStripZone(t *testing.T) {
 	cases := map[string]string{
 		"fe80::1":      "fe80::1",

@@ -41,6 +41,10 @@ type Config struct {
 	// EntryID uniquely identifies this entry among the PROXY's trusted
 	// entries. Required for ENTRY roles (Java entry.entry-id).
 	EntryID string
+	// ServerCommandAlias exposes the builtin /server command under this name
+	// for ENTRY roles (Java entry.server-command-alias). Empty defaults to
+	// "hub", matching the original plugin; "none" or "off" disables the alias.
+	ServerCommandAlias string
 	// VerificationType selects how packets are authenticated:
 	// VerificationRSA or VerificationKEY (Java entry.verification-type).
 	VerificationType string
@@ -194,6 +198,17 @@ func (p *plugin) initEntry(pr *proxy.Proxy) error {
 	p.channel = id
 	pr.ChannelRegistrar().Register(p.channel)
 
+	// Java PPlugin.replaceServerCommand(): expose /server under
+	// entry.server-command-alias (default "hub"). This is what players type on
+	// an entry, and the original plugin replaces /server with it.
+	alias := p.cfg.ServerCommandAlias
+	if alias == "" {
+		alias = "hub"
+	}
+	if err := pr.RegisterServerCommandAlias(alias); err != nil {
+		return fmt.Errorf("proxiedproxy: register server command alias %q: %w", alias, err)
+	}
+
 	switch p.cfg.VerificationType {
 	case VerificationRSA:
 		privPath, pubPath := p.cfg.PrivateKeyPath, p.cfg.PublicKeyPath
@@ -294,7 +309,7 @@ func (p *plugin) onServerLoginPluginMessage(e *proxy.ServerLoginPluginMessageEve
 		return
 	}
 	prof := player.GameProfile()
-	profileJSON, err := marshalNoEscape(&prof)
+	profileJSON, err := marshalForwardingProfile(prof)
 	if err != nil {
 		p.log.Error(err, "Failed marshaling the game profile for forwarding.")
 		return
@@ -570,8 +585,9 @@ func profileName(body []byte) string {
 }
 
 // marshalNoEscape encodes v as compact JSON without HTML escaping, matching
-// the original Gson output: the profile bytes are embedded verbatim and must
-// survive the wire unchanged for the signature to validate.
+// Gson's JsonObject.toString() (htmlSafe=false), which is the form Java signs.
+// Do not switch to json.Marshal's default HTML-safe output: it escapes <, >
+// and & and would change the signed bytes.
 func marshalNoEscape(v any) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -580,6 +596,51 @@ func marshalNoEscape(v any) ([]byte, error) {
 		return nil, err
 	}
 	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
+// forwardingProfile mirrors the Gson shape of Velocity's GameProfile: both the
+// dashed "id" and the "undashedId" are serialized. The downstream PROXY
+// deserializes this object with Gson into a Velocity GameProfile, whose UUID
+// adapter requires the dashed form; sending only an undashed id makes
+// UUID.fromString fail and the login packet is rejected before verification.
+// Field order matches the Java class.
+type forwardingProfile struct {
+	ID         string               `json:"id"`
+	UndashedID string               `json:"undashedId"`
+	Name       string               `json:"name"`
+	Properties []forwardingProperty `json:"properties"`
+}
+
+// forwardingProperty matches Velocity's GameProfile.Property Gson shape. The
+// signature is always present (the Java field is non-null), so it has no
+// omitempty.
+type forwardingProperty struct {
+	Name      string `json:"name"`
+	Value     string `json:"value"`
+	Signature string `json:"signature,omitempty"`
+}
+
+// marshalForwardingProfile serializes a Gate profile for the ProxiedProxy
+// ENTRY->PROXY wire format. It deliberately does not reuse
+// profile.GameProfile.MarshalJSON: that emits an undashed UUID for Gate's own
+// JSON consumers, while Velocity's Gson requires the dashed id and also carries
+// undashedId. The output is not HTML-escaped because the Java signature is
+// computed over JsonObject.toString() (see marshalNoEscape).
+func marshalForwardingProfile(prof profile.GameProfile) ([]byte, error) {
+	fp := forwardingProfile{
+		ID:         prof.ID.String(),
+		UndashedID: prof.ID.Undashed(),
+		Name:       prof.Name,
+		Properties: make([]forwardingProperty, len(prof.Properties)),
+	}
+	for i, prop := range prof.Properties {
+		fp.Properties[i] = forwardingProperty{
+			Name:      prop.Name,
+			Value:     prop.Value,
+			Signature: prop.Signature,
+		}
+	}
+	return marshalNoEscape(fp)
 }
 
 // text returns a plain text component for disconnect reasons.

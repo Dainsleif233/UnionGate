@@ -162,6 +162,7 @@ func cfg2pp(in config.ProxiedProxyConfig) proxiedproxy.Config {
 	return proxiedproxy.Config{
 		Role:                  proxiedproxy.Role(in.Role),
 		EntryID:               in.EntryID,
+		ServerCommandAlias:    in.ServerCommandAlias,
 		VerificationType:      in.VerificationType,
 		PrivateKeyPath:        in.PrivateKeyPath,
 		PublicKeyPath:         in.PublicKeyPath,

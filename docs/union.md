@@ -99,7 +99,7 @@ union:
 ```
 
 - ENTRY 启动自动生成/加载 RSA3072（`PrivateKey.pem 0600` + `PublicKey.pem` + `entry.json`），重启不轮换（D 值比对）。**换入口时必须复用旧 `PrivateKey.pem`/`entry.json`**；新密钥需要把新 `entry.json` 发给每个成员 PROXY 更新 `TrustedEntries.json`，否则验签失败。
-- 入口 ENTRY 的 profile 序列化必须与 Java 逐字节兼容：`id` 用带连字符 UUID 且同时带 `undashedId`，JSON 按 Gson HTML-safe 转义（`< > & = '` → `\uXXXX`）。base64 皮肤值里的 `=` 若未转义，成员 PROXY 端 `profile.toString()` 会变成 `\u003d`，RSA 验签必然失败。
+- 入口 ENTRY 的 profile 序列化必须与 Java 逐字节兼容：`id` 用带连字符 UUID，并同时带 `undashedId`。RSA 签的是 Gson `JsonObject.toString()` 的 **raw** 形式（`htmlSafe=false`，不转义 `< > & = '`）；Java ENTRY 的 wire JSON 可能被 `Gson.toJson` 做 HTML-safe 转义，但接收端解析后签名仍按 raw 计算。本 fork 的 ENTRY 直接发 raw，PROXY 验签前会把 wire profile 的 HTML-safe 转义还原为 raw，因此两边互通。
 - PROXY 对上游 ENTRY `PreLogin` 发 `proxied-proxy:login/forward` 并强制离线鉴权；Verify 通过则 `GameProfileRequest` 换 profile + 记 forwardedAddr（登录窗口内生效，`PostLogin` 清理），失败记 `ok:false` 走 `PostLogin` 断开（坏包不再 panic，见 m02734 修）。
 - `SendV1Verification` 仅为配置兼容保留，未实现（V1 签的是 Java GameProfile toString，无可移植定义）。
 
@@ -135,9 +135,23 @@ config:
 
 union 与 Via 无冲突（union 无 Via 引用）。hermetic 测试只能证到 artifact resolution 边界（`Offline + 不存在的 BinaryPath` fail-fast），不能离线真 boot——这是预期。
 
+### 3.6 全模式 ping 直通（服务器列表回显成员服 MOTD）
+
+```yaml
+config:
+  status:
+    pingPassthrough: all   # disabled（默认）| mods | all
+```
+
+- full 模式原先只回 Gate 自己的 status；Lite 的 ping 直通和 Union/Via 不兼容，所以这里在 full 模式实现。
+- 后端选择顺序：MUA 动态 forced host（按客户端请求域名）→ 静态 `forcedHosts` → `try`；用客户端协议 dial 后端，3 秒超时。
+- `all`：完整回显后端 MOTD/favicon/玩家数/版本/mod 信息；`mods`：保留 Gate 的 MOTD/玩家数/版本，只复制后端 Forge/NeoForge 元数据（`modinfo`、`forgeData`、`neoforgeData`）。
+- 后端不可达或无匹配后端时回退本地 status，不会导致列表空。
+- `pingPassthrough` 属于 `config.status`，不是 `union`；改完需重启。
+
 ## 4. 完整配置段（copy-paste）
 
-见 `config.yml:539-603`（`frps:` + `union:` 全段注释）。`config-simple/lite.yml` 只指回主模板。Lite 下 frps 照绑但隧道后端永不接客（只走 `lite.routes`），union/frps 会告警。
+见 `config.yml:550-629`（`frps:` + `union:` 全段注释）。`config-simple/lite.yml` 只指回主模板。Lite 下 frps 照绑但隧道后端永不接客（只走 `lite.routes`），union/frps 会告警。
 
 ## 5. 验证（hermetic，不过网）
 
@@ -148,7 +162,7 @@ go test ./pkg/union/... -count=1
 go test ./pkg/gate/ -count=1
 ```
 
-关键用例：`TestStartupUnionFrpcMua`（真 frpc 进 embedded frps）、`TestLiveSignedForwardingRoundTrip`（RSA 全链路+篡改/过期/重放拒绝）、`TestStartupUnionFullStack`（frps+MUA+PROXY+dimension+mapmod 一次 boot）、Via 四件套（New 接线/Offline fail-fast/Lite 互斥）。
+关键用例：`TestStartupUnionFrpcMua`（真 frpc 进 embedded frps）、`TestLiveSignedForwardingRoundTrip`（RSA 全链路+篡改/过期/重放拒绝）、`TestStartupUnionFullStack`（frps+MUA+PROXY+dimension+mapmod 一次 boot）、`TestResolveInitialPingAllUsesBackend`/`TestResolveInitialPingModsCopiesModInfoOnly`（ping 直通）、Via 四件套（New 接线/Offline fail-fast/Lite 互斥）。
 
 ## 6. 边界与运维
 

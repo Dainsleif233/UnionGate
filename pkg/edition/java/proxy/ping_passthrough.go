@@ -113,9 +113,9 @@ func passthroughVirtualHost(inbound Inbound) (host string, port int) {
 }
 
 // clearVirtualHostSeparators removes the NUL-separated Forge/TCPShield data
-// from a handshake host. The OpenCode union fork must not import the Lite
-// package here (Lite is disabled together with union plugins), so this is a
-// small local equivalent of lite.ClearVirtualHost for the first NUL field.
+// from a handshake host. It is a small local equivalent of
+// lite.ClearVirtualHost, kept here so the status path does not depend on the
+// Lite routing configuration.
 func clearVirtualHostSeparators(vhost string) string {
 	vhost = strings.Split(vhost, "\x00")[0] // Forge FML separator
 	vhost = strings.Split(vhost, "///")[0]  // TCPShield real IP separator

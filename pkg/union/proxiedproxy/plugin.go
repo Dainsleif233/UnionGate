@@ -612,8 +612,8 @@ type forwardingProfile struct {
 }
 
 // forwardingProperty matches Velocity's GameProfile.Property Gson shape. The
-// signature is always present (the Java field is non-null), so it has no
-// omitempty.
+// signature is omitted when empty so unsigned properties match Velocity's Gson
+// output, which drops a null signature.
 type forwardingProperty struct {
 	Name      string `json:"name"`
 	Value     string `json:"value"`

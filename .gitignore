@@ -1,0 +1,8 @@
+.idea
+.yarn
+/.web/docs/.vitepress/cache
+tmp
+.geyser
+./gate
+.DS_Store
+config-forge-test.yml

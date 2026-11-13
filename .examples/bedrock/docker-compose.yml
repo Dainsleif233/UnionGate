@@ -1,0 +1,36 @@
+services:
+  gate:
+    image: ghcr.io/minekube/gate:latest
+    restart: unless-stopped
+    working_dir: /data
+    environment:
+      - GATE_CONFIG=/config/gate.yml
+    volumes:
+      - ./gate.yml:/config/gate.yml:ro
+      - gate-cache:/var/cache/gate
+      - gate-data:/data
+    ports:
+      - '25565:25565' # Java Edition
+      - '19132:19132/udp' # Bedrock Edition
+    depends_on:
+      - server1
+
+  server1:
+    image: itzg/minecraft-server:java25
+    restart: unless-stopped
+    environment:
+      EULA: 'TRUE'
+      TYPE: PAPER
+      VERSION: 26.1.2
+      PAPER_BUILD: latest
+    volumes:
+      - server-data:/data
+      - ./server.properties:/data/server.properties
+      - ./spigot.yml:/data/spigot.yml
+    expose:
+      - '25565'
+
+volumes:
+  gate-cache:
+  gate-data:
+  server-data:

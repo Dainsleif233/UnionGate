@@ -1,0 +1,471 @@
+package proxy
+
+import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"errors"
+	"regexp"
+	"strings"
+	"time"
+
+	"go.minekube.com/gate/pkg/edition/java/proto/state"
+
+	"github.com/go-logr/logr"
+	"go.minekube.com/common/minecraft/color"
+	"go.minekube.com/common/minecraft/component"
+	"go.minekube.com/gate/pkg/edition/java/config"
+	"go.minekube.com/gate/pkg/edition/java/netmc"
+	"go.minekube.com/gate/pkg/edition/java/proto/util"
+	"go.minekube.com/gate/pkg/edition/java/proxy/crypto"
+	"go.minekube.com/gate/pkg/edition/java/proxy/crypto/keyrevision"
+
+	"go.minekube.com/gate/pkg/edition/java/profile"
+	"go.minekube.com/gate/pkg/edition/java/proto/packet"
+	"go.minekube.com/gate/pkg/edition/java/proto/version"
+	"go.minekube.com/gate/pkg/gate/proto"
+	connectiontelemetry "go.minekube.com/gate/pkg/telemetry/connection"
+	"go.minekube.com/gate/pkg/util/netutil"
+	"go.minekube.com/gate/pkg/util/uuid"
+)
+
+type initialLoginSessionHandler struct {
+	*sessionHandlerDeps
+
+	conn    netmc.MinecraftConn
+	inbound *loginInboundConn
+	log     logr.Logger
+
+	nopSessionHandler
+
+	currentState loginState
+	login        *packet.ServerLogin
+	verify       []byte
+}
+
+type loginState string
+
+const (
+	loginPacketExpectedLoginState        loginState = "loginPacketExpected"
+	loginPacketReceivedLoginState        loginState = "loginPacketReceived"
+	encryptionRequestSentLoginState      loginState = "encryptionRequestSent"
+	encryptionResponseReceivedLoginState loginState = "encryptionResponseReceived"
+)
+
+func newInitialLoginSessionHandler(
+	conn netmc.MinecraftConn,
+	inbound *loginInboundConn,
+	deps *sessionHandlerDeps,
+) netmc.SessionHandler {
+	return &initialLoginSessionHandler{
+		sessionHandlerDeps: deps,
+		conn:               conn,
+		inbound:            inbound,
+		log:                logr.FromContextOrDiscard(conn.Context()).WithName("loginSession"),
+		currentState:       loginPacketExpectedLoginState,
+	}
+}
+
+var invalidPlayerName = &component.Text{
+	Content: "Your username has an invalid format.",
+	S:       component.Style{Color: color.Red},
+}
+
+func (l *initialLoginSessionHandler) HandlePacket(p *proto.PacketContext) {
+	if !p.KnownPacket() {
+		// unknown packet, close connection
+		_ = l.conn.Close()
+		return
+	}
+	switch t := p.Packet.(type) {
+	case *packet.ServerLogin:
+		l.handleServerLogin(t)
+	case *packet.LoginPluginResponse:
+		_ = l.inbound.handleLoginPluginResponse(t)
+	case *packet.EncryptionResponse:
+		l.handleEncryptionResponse(t)
+	default:
+		// got unexpected packet, simply close
+		_ = l.conn.Close()
+	}
+}
+
+var playerNameRegex = regexp.MustCompile(`^[A-Za-z0-9_]{2,16}$`)
+
+// GameProfileProvider provides the GameProfile for a player connection.
+type GameProfileProvider interface {
+	GameProfile() (profile *profile.GameProfile)
+}
+
+func (l *initialLoginSessionHandler) handleServerLogin(login *packet.ServerLogin) {
+	if observation, ok := connectiontelemetry.FromContext(l.conn.Context()); ok {
+		observation.Observe(l.conn.Context(), connectiontelemetry.Auth, connectiontelemetry.OutcomeUnknown)
+	}
+	if !l.assertState(loginPacketExpectedLoginState) {
+		return
+	}
+	l.currentState = loginPacketReceivedLoginState
+
+	// Validate username format
+	if !playerNameRegex.MatchString(login.Username) {
+		_ = l.inbound.disconnect(invalidPlayerName)
+		return
+	}
+
+	playerKey := login.PlayerKey
+	if playerKey != nil {
+		if playerKey.Expired() {
+			l.log.V(1).Info("expired player public key")
+			_ = l.inbound.disconnect(&component.Translation{
+				Key: "multiplayer.disconnect.invalid_public_key_signature",
+			})
+			return
+		}
+
+		var isKeyValid bool
+		if playerKey.KeyRevision() == keyrevision.LinkedV2 && crypto.CanSetHolder(playerKey) {
+			isKeyValid = crypto.SetHolder(playerKey, login.HolderID)
+		} else {
+			isKeyValid = playerKey.SignatureValid()
+		}
+
+		if !isKeyValid {
+			l.log.V(1).Info("invalid player public key signature")
+			_ = l.inbound.disconnect(&component.Translation{
+				Key: "multiplayer.disconnect.invalid_public_key",
+			})
+			return
+		}
+	} else if l.conn.Protocol().GreaterEqual(version.Minecraft_1_19) &&
+		l.config().ForceKeyAuthentication &&
+		l.conn.Protocol().Lower(version.Minecraft_1_19_3) {
+		_ = l.inbound.disconnect(&component.Translation{
+			Key: "multiplayer.disconnect.missing_public_key",
+		})
+		return
+	}
+	l.inbound.playerKey = playerKey
+	l.login = login
+
+	e := newPreLoginEvent(l.inbound, l.login.Username, l.login.HolderID)
+	l.eventMgr.Fire(e)
+
+	if netmc.Closed(l.conn) {
+		return // Player was disconnected
+	}
+
+	if e.Result() == DeniedPreLogin {
+		_ = l.inbound.disconnect(e.Reason())
+		return
+	}
+	if offlineModeUsernameBlocked(l.config(), e.Result(),
+		connectTunnelIngress(l.conn), l.login.Username, sessionIdentity(l.conn)) {
+		reason := l.config().OfflineModeUsernameBlacklistReason
+		if reason == nil {
+			reason = config.DefaultConfig.OfflineModeUsernameBlacklistReason
+		}
+		_ = l.inbound.disconnect(reason.T())
+		return
+	}
+
+	_ = l.inbound.loginEventFired(func() error {
+		if netmc.Closed(l.conn) {
+			return nil // Player was disconnected
+		}
+
+		if e.Result() != ForceOfflineModePreLogin &&
+			(e.Result() == ForceOnlineModePreLogin || l.config().OnlineMode) {
+
+			if p, ok := netmc.Assert[GameProfileProvider](l.conn); ok {
+				sh := l.newAuthSessionHandler(l.inbound, p.GameProfile(), false, "")
+				l.conn.SetActiveSessionHandler(state.Login, sh)
+				return nil
+			}
+
+			// Online mode login, send encryption request
+			request := l.generateEncryptionRequest()
+			l.verify = make([]byte, len(request.VerifyToken))
+			copy(l.verify, request.VerifyToken)
+			err := l.conn.WritePacket(request)
+			if err != nil {
+				return err
+			}
+			l.currentState = encryptionRequestSentLoginState
+			// Wait for EncryptionResponse packet
+			return nil
+		}
+
+		// Offline mode login
+		sh := l.newAuthSessionHandler(l.inbound, profile.NewOffline(l.login.Username), false, "")
+		l.conn.SetActiveSessionHandler(state.Login, sh)
+		return nil
+	})
+}
+
+// ConnectTunnelIngress is a provenance marker installed only by Gate's
+// authenticated Connect tunnel adapter. It is intentionally independent of a
+// player's address and handshake, both of which are player-controlled inputs.
+type ConnectTunnelIngress interface {
+	IsConnectTunnelIngress() bool
+}
+
+func connectTunnelIngress(conn netmc.MinecraftConn) bool {
+	ingress, ok := netmc.Assert[ConnectTunnelIngress](conn)
+	return ok && ingress.IsConnectTunnelIngress()
+}
+
+// sessionIdentity returns the game profile the connection supplies, if any. A
+// Connect tunnel supplies the profile its TunnelService authenticated — or, for
+// an offline session, the offline identity derived from the requested name. A
+// direct connection has none: it authenticates with Mojang (online mode) or
+// completes with profile.NewOffline (offline mode).
+func sessionIdentity(conn netmc.MinecraftConn) *profile.GameProfile {
+	p, ok := netmc.Assert[GameProfileProvider](conn)
+	if !ok {
+		return nil
+	}
+	return p.GameProfile()
+}
+
+// isOfflineIdentity reports whether a session's identity is an unauthenticated
+// offline-mode identity: an identity whose UUID is the offline UUID (the v3
+// digest of a name) — either of the name this login claims or of the name the
+// identity itself carries. Mojang-authenticated identities are random UUIDs and
+// never match an offline digest. Comparing against both names keeps the
+// determination fail-closed when a login path renames or re-cases the player.
+// A nil identity is NOT offline: such a join still has to authenticate before it
+// can complete login (and under online mode a client that cannot answer the
+// EncryptionRequest never completes).
+func isOfflineIdentity(username string, identity *profile.GameProfile) bool {
+	if identity == nil {
+		return false
+	}
+	if identity.ID == uuid.OfflinePlayerUUID(username) {
+		return true
+	}
+	return identity.Name != "" && identity.ID == uuid.OfflinePlayerUUID(identity.Name)
+}
+
+// offlineModeUsernameBlocked reports whether the reserved-name list applies to
+// this login. A login is "effectively offline mode" when the player is not
+// authenticated: either the proxy runs offline mode, or the session's identity
+// is an offline-mode identity (a cracked join, e.g. through Connect, whose
+// supplied profile is the offline identity for the requested name).
+// Mojang-authenticated joins keep the reserved names.
+func offlineModeUsernameBlocked(
+	cfg *config.Config,
+	result PreLoginResult,
+	connectIngress bool,
+	username string,
+	identity *profile.GameProfile,
+) bool {
+	offline := result == ForceOfflineModePreLogin ||
+		(result != ForceOnlineModePreLogin && !cfg.OnlineMode) ||
+		isOfflineIdentity(username, identity)
+	if !offline {
+		return false
+	}
+	if cfg.OfflineModeUsernameBlacklistScope == config.OfflineModeUsernameBlacklistScopeConnect && !connectIngress {
+		return false
+	}
+	for _, blocked := range cfg.OfflineModeUsernameBlacklist {
+		if strings.EqualFold(blocked, username) {
+			return true
+		}
+	}
+	return false
+}
+
+func (l *initialLoginSessionHandler) newAuthSessionHandler(
+	inbound *loginInboundConn,
+	profile *profile.GameProfile,
+	onlineMode bool,
+	serverIDHash string,
+) netmc.SessionHandler {
+	return newAuthSessionHandler(
+		inbound,
+		profile,
+		onlineMode,
+		serverIDHash,
+		l.sessionHandlerDeps,
+	)
+}
+
+func (l *initialLoginSessionHandler) generateEncryptionRequest() *packet.EncryptionRequest {
+	verify := make([]byte, 4)
+	_, _ = rand.Read(verify)
+	return &packet.EncryptionRequest{
+		PublicKey:   l.auth().PublicKey(),
+		VerifyToken: verify,
+	}
+}
+
+var unableAuthWithMojang = &component.Text{
+	Content: "Unable to authenticate you with Mojang.\nPlease try again!",
+	S:       component.Style{Color: color.Red},
+}
+
+func (l *initialLoginSessionHandler) handleEncryptionResponse(resp *packet.EncryptionResponse) {
+	if !l.assertState(encryptionRequestSentLoginState) {
+		return
+	}
+	l.currentState = encryptionResponseReceivedLoginState
+
+	if l.login == nil {
+		l.log.V(1).Info("no ServerLogin packet received yet, disconnecting")
+		_ = l.conn.Close()
+		return
+	}
+	if len(l.verify) == 0 {
+		l.log.V(1).Info("no EncryptionRequest packet sent yet, disconnecting")
+		_ = l.conn.Close()
+		return
+	}
+
+	if playerKey := l.inbound.IdentifiedKey(); playerKey != nil {
+		if resp.Salt == nil {
+			l.log.V(1).Info("encryption response did not contain salt")
+			_ = l.conn.Close()
+			return
+		}
+		salt := new(bytes.Buffer)
+		_ = util.WriteInt64(salt, *resp.Salt)
+		valid := playerKey.VerifyDataSignature(resp.VerifyToken, l.verify, salt.Bytes())
+		if !valid {
+			l.log.Info("invalid client public signature")
+			_ = l.conn.Close()
+			return
+		}
+	} else {
+		valid, err := l.auth().Verify(resp.VerifyToken, l.verify)
+		if err != nil {
+			// Simply close the connection without much overhead.
+			_ = l.conn.Close()
+			return
+		}
+		if !valid {
+			l.log.Info("invalid verification token")
+			_ = l.conn.Close()
+			return
+		}
+	}
+
+	authn := l.auth()
+	decryptedSharedSecret, err := authn.DecryptSharedSecret(resp.SharedSecret)
+	if err != nil {
+		// Simple close the connection without much overhead.
+		_ = l.conn.Close()
+		return
+	}
+
+	// Enable encryption.
+	// Once the client sends EncryptionResponse, encryption is enabled.
+	if err = l.conn.EnableEncryption(decryptedSharedSecret); err != nil {
+		l.log.Error(err, "error enabling encryption for connecting player")
+		_ = netmc.CloseWith(l.conn, packet.NewDisconnect(internalServerConnectionError, l.conn.Protocol(), l.conn.State().State))
+		return
+	}
+
+	var optionalUserIP string
+	if l.config().ShouldPreventClientProxyConnections {
+		optionalUserIP = netutil.Host(l.conn.RemoteAddr())
+	}
+
+	serverID, err := authn.GenerateServerID(decryptedSharedSecret)
+	if err != nil {
+		// Simple close the connection without much overhead.
+		_ = l.inbound.disconnect(unableAuthWithMojang)
+		return
+	}
+
+	log := l.log.WithName("authn")
+	ctx, cancel := context.WithTimeout(logr.NewContext(l.conn.Context(), log), 30*time.Second)
+	defer cancel()
+
+	authResp, err := authn.AuthenticateJoin(ctx, serverID, l.login.Username, optionalUserIP)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			// The player disconnected before receiving authentication response.
+			return
+		}
+		_ = netmc.CloseWith(l.conn, packet.NewDisconnect(unableAuthWithMojang, l.conn.Protocol(), l.conn.State().State))
+		return
+	}
+
+	if !authResp.OnlineMode() {
+		log.Info("disconnect offline mode player")
+		// Apparently an offline-mode user logged onto this online-mode proxy.
+		_ = netmc.CloseWith(l.conn, packet.NewDisconnect(onlineModeOnly, l.conn.Protocol(), l.conn.State().State))
+		return
+	}
+
+	// Extract game profile from response.
+	gameProfile, err := authResp.GameProfile()
+	if err != nil {
+		if netmc.CloseWith(l.conn, packet.NewDisconnect(unableAuthWithMojang, l.conn.Protocol(), l.conn.State().State)) == nil {
+			log.Error(err, "unable get GameProfile from Mojang authentication response")
+		}
+		return
+	}
+
+	// All went well, initialize the session.
+	sh := l.newAuthSessionHandler(l.inbound, gameProfile, true, serverID)
+	l.conn.SetActiveSessionHandler(state.Login, sh)
+}
+
+var (
+	onlineModeOnly = &component.Text{
+		Content: `This server only accepts connections from online-mode clients.
+
+Did you change your username?
+Restart your game or sign out of Minecraft, sign back in, and try again.`,
+		S: component.Style{Color: color.Red},
+	}
+)
+
+// Temporary english messages until localization support
+var (
+	alreadyConnected = &component.Text{
+		Content: "You are already connected to this server!",
+	}
+	alreadyInProgress = &component.Text{
+		Content: "You are already connecting to a server!",
+	}
+	noAvailableServers = &component.Text{
+		Content: "No available server.", S: component.Style{Color: color.Red},
+	}
+	internalServerConnectionError = &component.Text{
+		Content: "Internal server connection error",
+	}
+	// unexpectedDisconnect = &component.Text{
+	//	Content: "Unexpectedly disconnected from remote server - crash?",
+	// }
+	movedToNewServer = &component.Text{
+		Content: "The server you were on kicked you: ",
+		S:       component.Style{Color: color.Red},
+	}
+	illegalChatCharacters = &component.Text{
+		Content: "Illegal characters in chat",
+		S:       component.Style{Color: color.Red},
+	}
+)
+
+func (l *initialLoginSessionHandler) Disconnected() {
+	// This handler is active only until authentication has handed the client to
+	// the auth session, so its disconnect is a bounded failed-login outcome.
+	if observation, ok := connectiontelemetry.FromContext(l.conn.Context()); ok {
+		observation.Observe(l.conn.Context(), connectiontelemetry.Closed, connectiontelemetry.Failed)
+	}
+	l.inbound.cleanup()
+}
+
+func (l *initialLoginSessionHandler) assertState(expectedState loginState) bool {
+	if l.currentState == expectedState {
+		return true
+	}
+	l.log.Info("received an unexpected packet during initial login session",
+		"currentState", l.currentState,
+		"expectedState", expectedState)
+	_ = l.conn.Close()
+	return false
+}

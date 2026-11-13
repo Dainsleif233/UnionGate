@@ -1,0 +1,401 @@
+package proxy
+
+import (
+	"errors"
+	"reflect"
+	"time"
+
+	"go.minekube.com/gate/pkg/edition/java/internal/velocity"
+	"go.minekube.com/gate/pkg/edition/java/proto/packet/chat"
+	"go.minekube.com/gate/pkg/edition/java/proto/packet/cookie"
+
+	"go.minekube.com/common/minecraft/component"
+	"go.minekube.com/gate/pkg/edition/java/netmc"
+	"go.minekube.com/gate/pkg/edition/java/proto/version"
+	"go.minekube.com/gate/pkg/edition/java/proxy/message"
+	"go.uber.org/atomic"
+
+	"github.com/go-logr/logr"
+
+	"go.minekube.com/gate/pkg/edition/java/config"
+	"go.minekube.com/gate/pkg/edition/java/proto/packet"
+	"go.minekube.com/gate/pkg/edition/java/proto/state"
+	"go.minekube.com/gate/pkg/gate/proto"
+	"go.minekube.com/gate/pkg/util/errs"
+	"go.minekube.com/gate/pkg/util/netutil"
+)
+
+type backendLoginSessionHandler struct {
+	*sessionHandlerDeps
+
+	serverConn    *serverConnection
+	requestCtx    *connRequestCxt
+	listenDoneCtx chan struct{}
+	stallDoneCtx  chan struct{}
+	log           logr.Logger
+
+	informationForwarded atomic.Bool
+}
+
+var _ netmc.SessionHandler = (*backendLoginSessionHandler)(nil)
+
+func newBackendLoginSessionHandler(
+	serverConn *serverConnection,
+	requestCtx *connRequestCxt,
+	sessionHandlerDeps *sessionHandlerDeps,
+) netmc.SessionHandler {
+	return &backendLoginSessionHandler{
+		serverConn:         serverConn,
+		requestCtx:         requestCtx,
+		log:                serverConn.log.WithName("backendLoginSession"),
+		sessionHandlerDeps: sessionHandlerDeps,
+	}
+}
+
+func (b *backendLoginSessionHandler) Activated() {
+	b.listenDoneCtx = make(chan struct{})
+	b.stallDoneCtx = make(chan struct{})
+	// While the login is waiting, a backend that never sends a packet is
+	// invisible: the connection layer's read deadline is far longer than the
+	// configured readTimeout, so the join just sits there.
+	go b.reportSilentBackendAfterReadTimeout()
+	go func() {
+		select {
+		case <-b.listenDoneCtx:
+		case <-b.requestCtx.Done():
+			// We must check again since request context
+			// may be canceled before Deactivated() was run.
+			select {
+			case <-b.listenDoneCtx:
+				return
+			default:
+				b.requestCtx.result(nil, errors.New(
+					"context deadline exceeded while logging into backend server"))
+				b.serverConn.disconnect()
+			}
+		}
+	}()
+}
+
+// reportSilentBackendAfterReadTimeout logs once when the backend has not sent a
+// single packet within the configured read timeout, while Gate is still waiting
+// for it. It logs only; it does not close, kick or shorten anything.
+func (b *backendLoginSessionHandler) reportSilentBackendAfterReadTimeout() {
+	readTimeout := time.Duration(b.config().ReadTimeout)
+	if readTimeout <= 0 {
+		return
+	}
+	timer := time.NewTimer(readTimeout)
+	defer timer.Stop()
+	select {
+	case <-b.stallDoneCtx:
+		return
+	case <-timer.C:
+	}
+	b.serverConn.reportSilentBackend(b.log)
+}
+
+func (b *backendLoginSessionHandler) Deactivated() {
+	if b.listenDoneCtx != nil {
+		close(b.listenDoneCtx)
+	}
+	if b.stallDoneCtx != nil {
+		close(b.stallDoneCtx)
+	}
+}
+
+func (b *backendLoginSessionHandler) HandlePacket(pc *proto.PacketContext) {
+	if !pc.KnownPacket() {
+		return // ignore unknown
+	}
+
+	switch p := pc.Packet.(type) {
+	case *packet.LoginPluginMessage:
+		b.handleLoginPluginMessage(p)
+	case *packet.Disconnect:
+		b.handleDisconnect(p)
+	case *packet.EncryptionRequest:
+		b.handleEncryptionRequest()
+	case *packet.SetCompression:
+		b.handleSetCompression(p)
+	case *packet.ServerLoginSuccess:
+		b.handleServerLoginSuccess()
+	case *cookie.CookieStore:
+		b.log.Info("can only store cookie in CONFIGURATION or PLAY protocol")
+	default:
+		b.log.V(1).Info("Received unexpected packet from backend server while logging in",
+			"packetType", reflect.TypeOf(p))
+	}
+}
+
+// ErrServerOnlineMode indicates error in a ConnectionRequest when the backend server is in online mode.
+var ErrServerOnlineMode = errors.New("backend server is online mode, but should be offline")
+
+func (b *backendLoginSessionHandler) handleEncryptionRequest() {
+	// If we get an encryption request we know that the server is online mode or does not support tunneling!
+	// Server should be offline mode.
+	b.requestCtx.result(nil, ErrServerOnlineMode)
+}
+
+func (b *backendLoginSessionHandler) handleLoginPluginMessage(p *packet.LoginPluginMessage) {
+	mc, ok := b.serverConn.ensureConnected()
+	if !ok {
+		return
+	}
+	cfg := b.config()
+	if cfg.Forwarding.Mode == config.VelocityForwardingMode && p.Channel == velocity.IpForwardingChannel {
+
+		requestedForwardingVersion := velocity.DefaultForwardingVersion
+		// Check version
+		if len(p.Data) == 1 {
+			requestedForwardingVersion = int(p.Data[0])
+		}
+
+		forwardingData, err := velocity.CreateForwardingData(
+			[]byte(cfg.Forwarding.VelocitySecret),
+			netutil.Host(b.serverConn.Player().RemoteAddr()),
+			b.serverConn.player, requestedForwardingVersion,
+		)
+		if err != nil {
+			b.log.Error(err, "error creating velocity forwarding data")
+			b.serverConn.disconnect()
+			return
+		}
+		if mc.WritePacket(&packet.LoginPluginResponse{
+			ID:      p.ID,
+			Success: true,
+			Data:    forwardingData,
+		}) != nil {
+			return
+		}
+		b.informationForwarded.Store(true)
+		return
+	}
+
+	// Modern Forge FML relay: forward fml:loginwrapper messages to the client
+	// during initial connection, or replay cached responses during server switch.
+	if p.Channel == ForgeLoginWrapperChannel {
+		// Initial connection: relay to client (client still in LOGIN state)
+		b.serverConn.player.mu.RLock()
+		relay := b.serverConn.player.forgeLoginRelay
+		replayRelay := b.serverConn.player.forgeReplayRelay
+		b.serverConn.player.mu.RUnlock()
+
+		if relay != nil {
+			b.log.V(1).Info("relaying FML LoginPluginMessage to client",
+				"channel", p.Channel, "backendMsgID", p.ID, "dataLen", len(p.Data))
+			if err := relay.relayToClient(mc, p); err != nil {
+				b.log.Error(err, "error relaying forge login plugin message to client")
+				b.serverConn.disconnect()
+			}
+			return
+		}
+
+		// Server switch: replay cached response
+		if replayRelay != nil {
+			b.log.V(1).Info("replaying cached FML response to backend",
+				"channel", p.Channel, "backendMsgID", p.ID)
+			if err := replayRelay.replayResponse(p.ID, mc); err != nil {
+				b.log.Error(err, "error replaying forge login response")
+				b.serverConn.disconnect()
+			}
+			return
+		}
+	}
+
+	// Don't understand, fire event if we have subscribers
+	if !b.eventMgr.HasSubscriber(&ServerLoginPluginMessageEvent{}) {
+		_ = mc.WritePacket(&packet.LoginPluginResponse{
+			ID:      p.ID,
+			Success: false,
+		})
+		return
+	}
+
+	identifier, err := message.ChannelIdentifierFrom(p.Channel)
+	if err != nil {
+		b.log.V(1).Error(err, "could not parse channel from LoginPluginResponse")
+		return
+	}
+	e := &ServerLoginPluginMessageEvent{
+		id:         identifier,
+		contents:   p.Data,
+		sequenceID: p.ID,
+		serverConn: b.serverConn,
+	}
+	b.eventMgr.Fire(e)
+	if e.Result().Allowed() {
+		_ = mc.WritePacket(&packet.LoginPluginResponse{
+			ID:      p.ID,
+			Success: true,
+			Data:    e.Result().Response,
+		})
+		return
+	}
+	_ = mc.WritePacket(&packet.LoginPluginResponse{
+		ID:      p.ID,
+		Success: false,
+	})
+}
+
+func (b *backendLoginSessionHandler) handleDisconnect(p *packet.Disconnect) {
+	result := disconnectResultForPacket(b.log.V(1), p, b.serverConn.player.Protocol(), b.serverConn.server, true)
+	b.requestCtx.result(result, nil)
+	b.serverConn.disconnect()
+}
+
+func (b *backendLoginSessionHandler) handleSetCompression(packet *packet.SetCompression) {
+	conn, ok := b.serverConn.ensureConnected()
+	if ok {
+		if err := conn.SetCompressionThreshold(packet.Threshold); err != nil {
+			b.requestCtx.result(nil, err)
+			b.serverConn.disconnect()
+		}
+	}
+}
+
+var velocityIpForwardingFailure = &component.Text{
+	Content: "Your server did not send a forwarding request to the proxy. Is velocity forwarding set up correctly?",
+}
+
+func (b *backendLoginSessionHandler) handleServerLoginSuccess() {
+	if b.config().Forwarding.Mode == config.VelocityForwardingMode && !b.informationForwarded.Load() {
+		b.requestCtx.result(disconnectResult(velocityIpForwardingFailure, b.serverConn.server, true), nil)
+		b.serverConn.disconnect()
+		return
+	}
+
+	// Complete Modern Forge login relay if active.
+	// This sends the delayed ServerLoginSuccess to the client, transitioning
+	// it from LOGIN to PLAY state, and caches the FML exchanges for server switch.
+	b.serverConn.player.mu.Lock()
+	relay := b.serverConn.player.forgeLoginRelay
+	b.serverConn.player.forgeLoginRelay = nil
+	b.serverConn.player.forgeReplayRelay = nil
+	b.serverConn.player.mu.Unlock()
+
+	if relay != nil {
+		b.log.Info("completing Modern Forge login relay, sending LoginSuccess to client")
+		if err := relay.complete(); err != nil {
+			b.log.Error(err, "error completing forge login relay")
+			b.requestCtx.result(nil, err)
+			b.serverConn.disconnect()
+			return
+		}
+
+		// Cache the FML exchanges for future server switches.
+		exchanges := relay.exchanges()
+		b.serverConn.player.mu.Lock()
+		b.serverConn.player.forgeLoginCache = exchanges
+		b.serverConn.player.mu.Unlock()
+
+		// Switch client from LOGIN to PLAY state.
+		// The decoder's SetState uses atomic pointers, so this does not block
+		// even though the client's read loop may be in Decode waiting for data.
+		b.serverConn.player.MinecraftConn.SetActiveSessionHandler(state.Play,
+			newInitialConnectSessionHandler(b.serverConn.player))
+
+		b.eventMgr.Fire(&PostLoginEvent{player: b.serverConn.player})
+	}
+
+	// The player has been logged on to the backend server, but we're not done yet. There could be
+	// other problems that could arise before we get a JoinGame packet from the server.
+
+	// Move into the PLAY phase.
+	serverMc, ok := b.serverConn.ensureConnected()
+	if !ok {
+		return
+	}
+
+	if serverMc.Protocol().Lower(version.Minecraft_1_20_2) {
+		b.serverConn.setBackendStage(backendStagePlay)
+		serverMc.SetActiveSessionHandler(state.Play,
+			newBackendTransitionSessionHandler(b.serverConn, b.requestCtx, b.proxy))
+	} else {
+		b.serverConn.setBackendStage(backendStageConfiguration)
+		fail := func(err error) {
+			b.log.V(1).Error(err, "error transitioning to backend config state")
+			b.requestCtx.result(nil, err)
+			b.serverConn.disconnect()
+		}
+		err := serverMc.WritePacket(&packet.LoginAcknowledged{})
+		if err != nil {
+			fail(err)
+			return
+		}
+		sh, err := newBackendConfigSessionHandler(b.serverConn, b.requestCtx)
+		if err != nil {
+			fail(err)
+			return
+		}
+		serverMc.SetActiveSessionHandler(state.Config, sh)
+		player := b.serverConn.player
+		if pkt := player.ClientSettingsPacket(); pkt != nil {
+			err = serverMc.WritePacket(pkt)
+			if err != nil {
+				fail(err)
+				return
+			}
+		}
+
+		ash := player.ActiveSessionHandler()
+		if csh, ok := ash.(*clientConfigSessionHandler); ok {
+			if err = csh.flushQueuedPluginMessagesTo(b.serverConn); err != nil {
+				fail(err)
+				return
+			}
+		}
+		csh, ok := ash.(*clientPlaySessionHandler)
+		if ok {
+			serverMc.SetAutoReading(false)
+			csh.doSwitch().ThenAccept(func(any) {
+				serverMc.SetAutoReading(true)
+			})
+		}
+	}
+}
+
+func (b *backendLoginSessionHandler) Disconnected() {
+	// A backend that accepted the connection and never answered otherwise ends
+	// here as a generic, silent disconnect; name it instead.
+	b.serverConn.reportStalledBackend(b.log)
+	// A dynamic backend behind the translation bridge never answered because the
+	// bridge could not reach it: report what the bridge saw (backend, bridge
+	// address, stage) instead of the generic closed-connection message.
+	if failure := b.serverConn.bridgeDialFailed(); failure != nil {
+		b.requestCtx.result(nil, errs.WrapSilent(failure))
+		return
+	}
+	if b.config().Forwarding.Mode == config.LegacyForwardingMode || b.config().Forwarding.Mode == config.BungeeGuardForwardingMode {
+		b.requestCtx.result(nil, errs.NewSilentErr(`The connection to the remote server was unexpectedly closed.
+This is usually because the remote server does not have BungeeCord IP forwarding correctly enabled.`))
+	} else {
+		b.requestCtx.result(nil, errs.NewSilentErr("The connection to the remote server was unexpectedly closed."))
+	}
+}
+
+func disconnectResultForPacket(
+	errLog logr.Logger,
+	p *packet.Disconnect,
+	protocol proto.Protocol,
+	server RegisteredServer,
+	safe bool,
+) *connectionResult {
+	var reason *chat.ComponentHolder
+	if p != nil && p.Reason != nil {
+		reason = p.Reason
+	}
+	return disconnectResult(reason.AsComponentOrNil(), server, safe)
+}
+func disconnectResult(reason component.Component, server RegisteredServer, safe bool) *connectionResult {
+	return &connectionResult{
+		status:        ServerDisconnectedConnectionStatus,
+		reason:        reason,
+		safe:          safe,
+		attemptedConn: server,
+	}
+}
+
+func (b *backendLoginSessionHandler) config() *config.Config {
+	return b.configProvider.config()
+}

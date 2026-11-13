@@ -1,0 +1,52 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "description": "Release-chain updates (geyserlite -> gate -> moxy) must never be starved by the global PR backlog: the chain package rules get prPriority 100 so they are created first, and the concurrent limit keeps headroom above the stale-PR backlog that previously rate-limited geyserlite (Dependency Dashboard #119, v0.5.22 stuck for days behind 11 stale PRs at the default prConcurrentLimit of 10).",
+  "prConcurrentLimit": 25,
+  "prHourlyLimit": 5,
+  "packageRules": [
+    {
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchPackageNames": [
+        "go.minekube.com/geyserlite"
+      ],
+      "groupName": "geyserlite",
+      "commitMessagePrefix": "fix(deps):",
+      "commitMessageTopic": "geyserlite",
+      "labels": [
+        "dependencies",
+        "geyserlite"
+      ],
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "automerge": true,
+      "automergeType": "pr",
+      "platformAutomerge": true,
+      "prPriority": 100
+    },
+    {
+      "matchUpdateTypes": [
+        "minor",
+        "patch"
+      ],
+      "matchCurrentVersion": "!/^0/",
+      "automerge": true
+    },
+    {
+      "description": "Gate's example modules replace the root module locally, so version bumps of Gate itself only create release loops.",
+      "matchManagers": [
+        "gomod"
+      ],
+      "matchPackageNames": [
+        "go.minekube.com/gate"
+      ],
+      "enabled": false
+    }
+  ]
+}

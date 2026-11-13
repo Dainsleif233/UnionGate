@@ -1,0 +1,3 @@
+# pkg/edition/bedrock/geyser agent notes
+
+Bedrock gamertags cross into Java profiles in `pkg/edition/bedrock/geyser/geyser.go`; normalize the rendered `usernameFormat` to Java's 16-character ASCII alphabet by default. Paper also accepts `.`, while vanilla accepts only `[A-Za-z0-9_]`. `bedrock.preserveDotPrefix` explicitly opts into preserving one leading dot for compatible backends; interior dots, spaces and non-ASCII characters remain normalized. Apply the same policy to linked-identity names without changing identity trust. Preserve `username_test.go` and the YAML-to-profile regression in `dot_prefix_test.go` when changing this boundary.

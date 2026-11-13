@@ -1,0 +1,198 @@
+package proxy
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"syscall"
+
+	"github.com/go-logr/logr"
+	"go.minekube.com/gate/pkg/edition/java/forge/modinfo"
+	"go.minekube.com/gate/pkg/edition/java/netmc"
+	"go.minekube.com/gate/pkg/edition/java/ping"
+	"go.minekube.com/gate/pkg/edition/java/proto/packet"
+	"go.minekube.com/gate/pkg/edition/java/proto/version"
+	"go.minekube.com/gate/pkg/gate/proto"
+	"go.minekube.com/gate/pkg/util/errs"
+)
+
+type statusSessionHandler struct {
+	*sessionHandlerDeps
+
+	conn                netmc.MinecraftConn
+	inbound             Inbound
+	log                 logr.Logger
+	resolvePingResponse pingResolveFunc // used in lite mode
+
+	receivedRequest bool
+
+	nopSessionHandler
+}
+
+type pingResolveFunc func(log logr.Logger, statusRequestCtx *proto.PacketContext) (logr.Logger, *packet.StatusResponse, error)
+
+func newStatusSessionHandler(
+	conn netmc.MinecraftConn,
+	inbound Inbound,
+	sessionHandlerDeps *sessionHandlerDeps,
+	pingResolveFunc pingResolveFunc,
+) netmc.SessionHandler {
+	return &statusSessionHandler{
+		sessionHandlerDeps: sessionHandlerDeps,
+		conn:               conn,
+		inbound:            inbound,
+		log: logr.FromContextOrDiscard(conn.Context()).WithName("statusSession").WithValues(
+			"inbound", inbound,
+			"protocol", conn.Protocol()),
+		resolvePingResponse: pingResolveFunc,
+	}
+}
+
+func (h *statusSessionHandler) Activated() {
+	cfg := h.config()
+	var log logr.Logger
+	if cfg.Status.LogPingRequests || cfg.Debug {
+		log = h.log
+	} else {
+		log = h.log.V(1)
+	}
+	log.Info("got server list status request")
+}
+
+func (h *statusSessionHandler) HandlePacket(pc *proto.PacketContext) {
+	if !pc.KnownPacket() {
+		// What even is going on? ;D
+		_ = h.conn.Close()
+		return
+	}
+
+	switch pc.Packet.(type) {
+	case *packet.StatusRequest:
+		h.handleStatusRequest(pc)
+	case *packet.StatusPing:
+		h.handleStatusPing(pc)
+	// TODO add LegacyPing
+	default:
+		// unexpected packet, simply close
+		_ = h.conn.Close()
+	}
+}
+
+// defaultVersionName is the server list version string when
+// status.versionName is not configured.
+var defaultVersionName = fmt.Sprintf("Gate %s", version.SupportedVersionsString)
+
+func newInitialPing(p *Proxy, protocol proto.Protocol) *ping.ServerPing {
+	if !version.Protocol(protocol).Supported() {
+		protocol = version.MaximumVersion.Protocol
+	}
+	versionName := p.config().Status.VersionName
+	if versionName == "" {
+		versionName = defaultVersionName
+	}
+	var modInfo *modinfo.ModInfo
+	if p.config().AnnounceForge {
+		modInfo = modinfo.Default
+	}
+	return &ping.ServerPing{
+		Version: ping.Version{
+			Protocol: protocol,
+			Name:     versionName,
+		},
+		Players: &ping.Players{
+			Online: p.PlayerCount(),
+			Max:    p.config().Status.ShowMaxPlayers,
+		},
+		Description: p.config().Status.Motd.C(),
+		Favicon:     p.config().Status.Favicon,
+		ModInfo:     modInfo,
+	}
+}
+
+func (h *statusSessionHandler) handleStatusRequest(pc *proto.PacketContext) {
+	if h.receivedRequest {
+		// Already sent response
+		_ = h.conn.Close()
+		return
+	}
+	h.receivedRequest = true
+
+	e := &PingEvent{
+		inbound: h.inbound,
+	}
+
+	log := h.log
+	if h.resolvePingResponse == nil {
+		e.ping = newInitialPing(h.proxy, pc.Protocol)
+	} else {
+		var err error
+		var res *packet.StatusResponse
+		log, res, err = h.resolvePingResponse(h.log, pc)
+		if err != nil {
+			errs.V(log, err).Info("could not resolve ping", "error", err)
+			_ = h.conn.Close()
+			return
+		}
+		if !h.eventMgr.HasSubscriber(e) {
+			// Fast path: No event handler, just send response
+			h.writeStatusResponse(log, res)
+			return
+		}
+		// Need to unmarshal status response to ping struct for event handlers
+		e.ping = new(ping.ServerPing)
+		if err = json.Unmarshal([]byte(res.Status), e.ping); err != nil {
+			h.log.V(1).Error(err, "failed to unmarshal status response")
+			_ = h.conn.Close()
+			return
+		}
+	}
+
+	h.eventMgr.Fire(e)
+
+	if e.ping == nil {
+		_ = h.conn.Close()
+		log.V(1).Info("ping response was set to nil by an event handler, no response is sent")
+		return
+	}
+	if !h.inbound.Active() {
+		log.V(1).Info("status response not sent because inbound is inactive")
+		return
+	}
+
+	response, err := json.Marshal(e.ping)
+	if err != nil {
+		_ = h.conn.Close()
+		log.Error(err, "error marshaling ping response to json")
+		return
+	}
+	h.writeStatusResponse(log, &packet.StatusResponse{
+		Status: string(response),
+	})
+}
+
+func (h *statusSessionHandler) writeStatusResponse(log logr.Logger, response *packet.StatusResponse) {
+	if err := h.conn.WritePacket(response); err != nil {
+		statusResponseWriteErrorLog(log, err).Info("error writing status response", "error", err)
+		return
+	}
+	log.V(1).Info("sent status response")
+}
+
+func statusResponseWriteErrorLog(log logr.Logger, err error) logr.Logger {
+	var netErr net.Error
+	if errors.Is(err, netmc.ErrClosedConn) || errors.Is(err, io.ErrClosedPipe) ||
+		errs.IsConnClosedErr(err) || errors.Is(err, syscall.EPIPE) || errors.As(err, &netErr) {
+		return log.V(1)
+	}
+	return log
+}
+
+func (h *statusSessionHandler) handleStatusPing(p *proto.PacketContext) {
+	// Just return again and close
+	defer h.conn.Close()
+	if err := h.conn.Write(p.Payload); err != nil {
+		h.log.V(1).Info("error writing StatusPing response", "error", err)
+	}
+}

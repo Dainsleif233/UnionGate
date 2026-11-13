@@ -1,0 +1,195 @@
+package proxy
+
+import (
+	"context"
+	"net"
+	"testing"
+
+	"github.com/go-logr/logr"
+	"github.com/robinbraemer/event"
+	"go.minekube.com/gate/pkg/edition/java/proto/packet"
+	"go.minekube.com/gate/pkg/edition/java/proto/packet/config"
+	"go.minekube.com/gate/pkg/edition/java/proto/packet/plugin"
+	"go.minekube.com/gate/pkg/edition/java/proto/state"
+	"go.minekube.com/gate/pkg/edition/java/proto/version"
+	"go.minekube.com/gate/pkg/edition/java/proxy/internal/resourcepack"
+	"go.minekube.com/gate/pkg/edition/java/proxy/message"
+	"go.minekube.com/gate/pkg/gate/proto"
+	connectiontelemetry "go.minekube.com/gate/pkg/telemetry/connection"
+)
+
+func newTestConfigHandler(t *testing.T) (*clientConfigSessionHandler, *connectedPlayer, *serverConnection, *testMinecraftConn) {
+	t.Helper()
+
+	clientConn := &testMinecraftConn{}
+	backendConn := &testMinecraftConn{}
+	player := &connectedPlayer{
+		MinecraftConn: clientConn,
+		log:           logr.Discard(),
+	}
+	proxy := &Proxy{
+		event:            event.Nop,
+		channelRegistrar: message.NewChannelRegistrar(),
+	}
+	server := newRegisteredServer(NewServerInfo("purpur", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 25565}))
+	serverConn := newServerConnection(server, nil, player)
+	serverConn.connection = backendConn
+	player.sessionHandlerDeps = &sessionHandlerDeps{proxy: proxy}
+
+	return newClientConfigSessionHandler(player), player, serverConn, backendConn
+}
+
+func TestClientConfigDisconnectTerminatesInitialLifecycle(t *testing.T) {
+	var events telemetryEvents
+	ctx, _ := connectiontelemetry.Start(context.Background(), &events)
+	observeConfigDisconnect(ctx)
+	got := events[len(events)-1]
+	if !got.Terminal || got.Outcome != connectiontelemetry.Failed {
+		t.Fatalf("config disconnect telemetry = %#v", got)
+	}
+}
+
+func TestClientConfigQueuesPluginMessagesUntilBackendReady(t *testing.T) {
+	handler, player, serverConn, backendConn := newTestConfigHandler(t)
+
+	player.mu.Lock()
+	player.connInFlight = serverConn
+	player.mu.Unlock()
+
+	handler.handlePluginMessage(&plugin.Message{
+		Channel: "minecraft:register",
+		Data:    []byte("purpur:config"),
+	})
+
+	if got := len(backendConn.writtenPackets); got != 0 {
+		t.Fatalf("plugin message was written before backend config was ready: got %d packets", got)
+	}
+
+	if err := handler.flushQueuedPluginMessagesTo(serverConn); err != nil {
+		t.Fatalf("flush queued config plugin messages: %v", err)
+	}
+
+	if got := len(backendConn.writtenPackets); got != 1 {
+		t.Fatalf("queued plugin messages written to backend = %d, want 1", got)
+	}
+	got, ok := backendConn.writtenPackets[0].(*plugin.Message)
+	if !ok {
+		t.Fatalf("queued packet type = %T, want *plugin.Message", backendConn.writtenPackets[0])
+	}
+	if got.Channel != "minecraft:register" || string(got.Data) != "purpur:config" {
+		t.Fatalf("queued packet = %q %q, want minecraft:register purpur:config", got.Channel, string(got.Data))
+	}
+}
+
+func TestClientConfigForwardsPluginMessagesAfterBackendReady(t *testing.T) {
+	handler, player, serverConn, backendConn := newTestConfigHandler(t)
+
+	player.mu.Lock()
+	player.connInFlight = serverConn
+	player.mu.Unlock()
+
+	if err := handler.flushQueuedPluginMessagesTo(serverConn); err != nil {
+		t.Fatalf("mark backend ready: %v", err)
+	}
+
+	handler.handlePluginMessage(&plugin.Message{
+		Channel: "minecraft:register",
+		Data:    []byte("purpur:ready"),
+	})
+
+	if got := len(backendConn.writtenPackets); got != 1 {
+		t.Fatalf("direct plugin messages written to backend = %d, want 1", got)
+	}
+	got := backendConn.writtenPackets[0].(*plugin.Message)
+	if got.Channel != "minecraft:register" || string(got.Data) != "purpur:ready" {
+		t.Fatalf("direct packet = %q %q, want minecraft:register purpur:ready", got.Channel, string(got.Data))
+	}
+}
+
+func TestClientConfigForwardsCodeOfConductAcceptToInFlightBackend(t *testing.T) {
+	handler, player, serverConn, backendConn := newTestConfigHandler(t)
+
+	// Initial join: the backend is still in flight and no server is connected yet.
+	player.mu.Lock()
+	player.connInFlight = serverConn
+	player.mu.Unlock()
+
+	// The code of conduct accept is registered in the Config state but has no
+	// explicit case in HandlePacket, so it takes the generic config forward path.
+	// Dropping it parks the backend's configuration task chain forever.
+	handler.HandlePacket(&proto.PacketContext{
+		Direction: proto.ServerBound,
+		Protocol:  version.Minecraft_26_3.Protocol,
+		PacketID:  0x09,
+		Packet:    &config.CodeOfConductAcceptPacket{},
+		Payload:   []byte{0x09},
+	})
+
+	if got := len(backendConn.writtenPackets); got != 1 {
+		t.Fatalf("config packets forwarded to in-flight backend = %d, want 1 (code of conduct accept was dropped)", got)
+	}
+	if _, ok := backendConn.writtenPackets[0].(*config.CodeOfConductAcceptPacket); !ok {
+		t.Fatalf("forwarded packet type = %T, want *config.CodeOfConductAcceptPacket", backendConn.writtenPackets[0])
+	}
+}
+
+func TestClientConfigForwardsUnhandledResourcePackResponseToInFlightBackend(t *testing.T) {
+	handler, player, serverConn, backendConn := newTestConfigHandler(t)
+
+	player.mu.Lock()
+	player.connInFlight = serverConn
+	player.mu.Unlock()
+	player.resourcePackHandler = &stubPackHandler{}
+
+	handler.HandlePacket(&proto.PacketContext{
+		Direction: proto.ServerBound,
+		Protocol:  version.Minecraft_26_3.Protocol,
+		PacketID:  0x06,
+		Packet:    &packet.ResourcePackResponse{},
+		Payload:   []byte{0x06},
+	})
+
+	if got := len(backendConn.writtenPackets); got != 1 {
+		t.Fatalf("packet forwarded to in-flight backend = %d, want 1 (unhandled config resource pack response was dropped)", got)
+	}
+}
+
+// stubPackHandler delegates every method to the nil embedded Handler except the
+// response callback, which reports "not handled by the proxy" so the packet has
+// to be forwarded to the backend.
+type stubPackHandler struct {
+	resourcepack.Handler
+}
+
+func (s *stubPackHandler) OnResourcePackResponse(*resourcepack.ResponseBundle) (bool, error) {
+	return false, nil
+}
+
+func TestClientConfigBackendFinishReplaysClientBrandAndSwitchesOnlyOutboundState(t *testing.T) {
+	handler, player, serverConn, backendConn := newTestConfigHandler(t)
+	player.setClientBrand("vanilla")
+	handler.handlePluginMessage(&plugin.Message{
+		Channel: plugin.BrandChannel,
+		Data:    []byte{0x07, 'v', 'a', 'n', 'i', 'l', 'l', 'a'},
+	})
+
+	done := handler.handleBackendFinishUpdate(serverConn, &config.FinishedUpdate{})
+	if done == nil {
+		t.Fatal("handleBackendFinishUpdate returned nil future")
+	}
+
+	if got := len(backendConn.writtenPackets); got != 1 {
+		t.Fatalf("backend packets = %d, want replayed brand only", got)
+	}
+	brand, ok := backendConn.writtenPackets[0].(*plugin.Message)
+	if !ok {
+		t.Fatalf("backend packet type = %T, want *plugin.Message", backendConn.writtenPackets[0])
+	}
+	if brand.Channel != plugin.BrandChannel || string(plugin.ReadBrandMessage(brand.Data)) != "vanilla" {
+		t.Fatalf("brand replay = %q %q, want minecraft:brand vanilla", brand.Channel, plugin.ReadBrandMessage(brand.Data))
+	}
+	writer := player.Writer().(*testWriter)
+	if writer.state != state.Play {
+		t.Fatalf("client outbound state = %v, want Play", writer.state)
+	}
+}

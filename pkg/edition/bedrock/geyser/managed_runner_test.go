@@ -1,0 +1,354 @@
+//go:build !musl
+
+package geyser
+
+import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"go.minekube.com/gate/pkg/edition/bedrock/config"
+	geyserlite "go.minekube.com/geyserlite"
+)
+
+func TestNewManagedRunnerDefaultsToGeyserlite(t *testing.T) {
+	cfg := &config.Config{
+		GeyserListenAddr: "localhost:25567",
+		FloodgateKeyPath: "floodgate.pem",
+		Managed: &config.ManagedGeyser{
+			Enabled: true,
+		},
+	}
+
+	runner, err := newManagedRunner(cfg)
+	if err != nil {
+		t.Fatalf("newManagedRunner() error = %v", err)
+	}
+
+	if _, ok := runner.(*liteManagedRunner); !ok {
+		t.Fatalf("newManagedRunner() = %T, want *liteManagedRunner", runner)
+	}
+}
+
+func TestNewManagedRunnerKeepsJavaEngine(t *testing.T) {
+	cfg := &config.Config{
+		GeyserListenAddr: "localhost:25567",
+		FloodgateKeyPath: "floodgate.pem",
+		Managed: &config.ManagedGeyser{
+			Enabled: true,
+			Engine:  config.ManagedEngineJava,
+		},
+	}
+
+	runner, err := newManagedRunner(cfg)
+	if err != nil {
+		t.Fatalf("newManagedRunner() error = %v", err)
+	}
+
+	if _, ok := runner.(*javaManagedRunner); !ok {
+		t.Fatalf("newManagedRunner() = %T, want *javaManagedRunner", runner)
+	}
+}
+
+func TestNewManagedRunnerRejectsUnknownEngine(t *testing.T) {
+	cfg := &config.Config{
+		GeyserListenAddr: "localhost:25567",
+		FloodgateKeyPath: "floodgate.pem",
+		Managed: &config.ManagedGeyser{
+			Enabled: true,
+			Engine:  "bogus",
+		},
+	}
+
+	if _, err := newManagedRunner(cfg); err == nil {
+		t.Fatal("newManagedRunner() error = nil, want unknown engine error")
+	}
+}
+
+func TestLiteManagedRunnerOptionsMapManagedConfig(t *testing.T) {
+	tempDir := t.TempDir()
+	keyPath := filepath.Join(tempDir, "floodgate.key")
+	key := []byte("0123456789abcdef")
+	if err := os.WriteFile(keyPath, key, 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	cfg := &config.Config{
+		GeyserListenAddr: "localhost:25567",
+		FloodgateKeyPath: keyPath,
+		Managed: &config.ManagedGeyser{
+			Enabled:     true,
+			Engine:      config.ManagedEngineGeyserlite,
+			Mode:        "embedded",
+			LibraryPath: "/opt/geyserlite/libgeyserlite.so",
+			BinaryPath:  "/opt/geyserlite/geyserlite",
+			Mirror:      "https://mirror.example.com/geyserlite",
+			Version:     "v0.2.1",
+			Offline:     true,
+			ExtraArgs:   []string{"-Xmx512m"},
+			ConfigOverrides: map[string]any{
+				"bedrock": map[string]any{"port": 19133},
+			},
+		},
+	}
+
+	runner := newLiteManagedRunner(cfg)
+	opts, err := runner.options()
+	if err != nil {
+		t.Fatalf("options() error = %v", err)
+	}
+
+	if opts.Upstream != "localhost:25567" {
+		t.Fatalf("Upstream = %q, want localhost:25567", opts.Upstream)
+	}
+	if opts.AuthType != geyserlite.Floodgate {
+		t.Fatalf("AuthType = %v, want Floodgate", opts.AuthType)
+	}
+	if string(opts.FloodgateKey) != string(key) {
+		t.Fatalf("FloodgateKey = %q, want %q", opts.FloodgateKey, key)
+	}
+	if opts.Mode != geyserlite.ModeEmbedded {
+		t.Fatalf("Mode = %v, want ModeEmbedded", opts.Mode)
+	}
+	if opts.LibraryPath != "/opt/geyserlite/libgeyserlite.so" {
+		t.Fatalf("LibraryPath = %q", opts.LibraryPath)
+	}
+	if opts.BinaryPath != "/opt/geyserlite/geyserlite" {
+		t.Fatalf("BinaryPath = %q", opts.BinaryPath)
+	}
+	if opts.Mirror != "https://mirror.example.com/geyserlite" {
+		t.Fatalf("Mirror = %q", opts.Mirror)
+	}
+	if opts.Version != "v0.2.1" {
+		t.Fatalf("Version = %q", opts.Version)
+	}
+	if !opts.Offline {
+		t.Fatal("Offline = false, want true")
+	}
+	if len(opts.JVMArgs) != 1 || opts.JVMArgs[0] != "-Xmx512m" {
+		t.Fatalf("JVMArgs = %#v", opts.JVMArgs)
+	}
+	if opts.ConfigOverrides["bedrock"] == nil {
+		t.Fatalf("ConfigOverrides = %#v, want bedrock override", opts.ConfigOverrides)
+	}
+}
+
+func TestLiteManagedRunnerDefaultsUseSubprocessAutoDownload(t *testing.T) {
+	tempDir := t.TempDir()
+	keyPath := filepath.Join(tempDir, "floodgate.key")
+	key := []byte("0123456789abcdef")
+	if err := os.WriteFile(keyPath, key, 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	cfg := &config.Config{
+		GeyserListenAddr: "localhost:25567",
+		FloodgateKeyPath: keyPath,
+		Managed: &config.ManagedGeyser{
+			Enabled: true,
+			Engine:  config.ManagedEngineGeyserlite,
+		},
+	}
+
+	runner := newLiteManagedRunner(cfg)
+	opts, err := runner.options()
+	if err != nil {
+		t.Fatalf("options() error = %v", err)
+	}
+
+	if opts.Mode != geyserlite.ModeSubprocess {
+		t.Fatalf("Mode = %v, want ModeSubprocess", opts.Mode)
+	}
+	if opts.LibraryPath != "" {
+		t.Fatalf("LibraryPath = %q, want empty for auto-download subprocess mode", opts.LibraryPath)
+	}
+	if opts.BinaryPath != "" {
+		t.Fatalf("BinaryPath = %q, want empty for auto-download subprocess mode", opts.BinaryPath)
+	}
+	if opts.Version != "" {
+		t.Fatalf("Version = %q, want empty to use geyserlite.DefaultVersion", opts.Version)
+	}
+	if opts.Mirror != "" {
+		t.Fatalf("Mirror = %q, want empty to use geyserlite.DefaultDownloadBase", opts.Mirror)
+	}
+	if opts.Offline {
+		t.Fatal("Offline = true, want false so auto-download can fetch release assets")
+	}
+}
+
+func TestLiteManagedRunnerStartWaitsUntilHealthy(t *testing.T) {
+	tempDir := t.TempDir()
+	keyPath := filepath.Join(tempDir, "floodgate.key")
+	if err := os.WriteFile(keyPath, []byte("0123456789abcdef"), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	cfg := &config.Config{
+		GeyserListenAddr: "localhost:25567",
+		FloodgateKeyPath: keyPath,
+		Managed: &config.ManagedGeyser{
+			Enabled: true,
+			Engine:  config.ManagedEngineGeyserlite,
+		},
+	}
+
+	fake := &fakeGeyserliteServer{started: make(chan struct{})}
+	// A free port keeps the fail-fast Bedrock port check honest without
+	// depending on the host's default Bedrock port being unbound.
+	cfg.Managed.ConfigOverrides = map[string]any{
+		"bedrock": map[string]any{"port": freeUDPPort(t)},
+	}
+	runner := newLiteManagedRunner(cfg)
+	runner.newServer = func(geyserlite.Options) (geyserliteServer, error) {
+		return fake, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- runner.Start(ctx) }()
+
+	select {
+	case <-fake.started:
+	case <-time.After(time.Second):
+		t.Fatal("geyserlite server did not start")
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatalf("Start returned before Healthy: %v", err)
+	case <-time.After(2 * liteManagedReadyPoll):
+	}
+
+	fake.healthy.Store(true)
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("Start returned error after Healthy: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Start did not return after Healthy")
+	}
+
+	runner.Stop()
+}
+
+func TestLiteManagedRunnerReportsExitAfterHealthy(t *testing.T) {
+	tempDir := t.TempDir()
+	keyPath := filepath.Join(tempDir, "floodgate.key")
+	if err := os.WriteFile(keyPath, []byte("0123456789abcdef"), 0o600); err != nil {
+		t.Fatalf("write key: %v", err)
+	}
+
+	fake := &fakeGeyserliteServer{
+		started: make(chan struct{}),
+		crash:   make(chan error, 1),
+	}
+	runner := newLiteManagedRunner(&config.Config{
+		GeyserListenAddr: "localhost:25567",
+		FloodgateKeyPath: keyPath,
+		Managed: &config.ManagedGeyser{
+			Enabled: true,
+			Engine:  config.ManagedEngineGeyserlite,
+			// See TestLiteManagedRunnerStartWaitsUntilHealthy.
+			ConfigOverrides: map[string]any{
+				"bedrock": map[string]any{"port": freeUDPPort(t)},
+			},
+		},
+	})
+	runner.newServer = func(geyserlite.Options) (geyserliteServer, error) { return fake, nil }
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- runner.Start(context.Background()) }()
+	select {
+	case <-fake.started:
+	case <-time.After(time.Second):
+		t.Fatal("geyserlite server did not start")
+	}
+	fake.healthy.Store(true)
+	if err := <-errCh; err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+
+	done := runner.Done()
+	if done == nil {
+		t.Fatal("Done() = nil after successful startup")
+	}
+	want := errors.New("simulated GeyserLite crash")
+	fake.crash <- want
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Done() did not close after server exit")
+	}
+	if !errors.Is(runner.Err(), want) {
+		t.Fatalf("Err() = %v, want %v", runner.Err(), want)
+	}
+}
+
+func TestIntegrationReportsManagedRuntimeExit(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	want := errors.New("simulated GeyserLite crash")
+	manager := &fakeManagedRunner{done: make(chan struct{}), err: want}
+	integration := &Integration{
+		ctx:        ctx,
+		manager:    manager,
+		runtimeErr: make(chan error, 1),
+	}
+
+	integration.watchManagedRuntime()
+	close(manager.done)
+	select {
+	case got := <-integration.RuntimeErrors():
+		if !errors.Is(got, want) {
+			t.Fatalf("RuntimeErrors() = %v, want %v", got, want)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RuntimeErrors() did not report managed runtime exit")
+	}
+}
+
+type fakeGeyserliteServer struct {
+	healthy atomic.Bool
+	started chan struct{}
+	crash   chan error
+	opened  <-chan geyserlite.ConnectionOpen
+}
+
+func (f *fakeGeyserliteServer) Start(ctx context.Context) error {
+	close(f.started)
+	if f.crash == nil {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case err := <-f.crash:
+		return err
+	}
+}
+
+func (f *fakeGeyserliteServer) Stop(context.Context) error { return nil }
+
+func (f *fakeGeyserliteServer) Healthy() bool { return f.healthy.Load() }
+
+func (f *fakeGeyserliteServer) ConnectionOpened() <-chan geyserlite.ConnectionOpen {
+	return f.opened
+}
+
+type fakeManagedRunner struct {
+	done chan struct{}
+	err  error
+}
+
+func (f *fakeManagedRunner) EnsureKey(context.Context) error { return nil }
+func (f *fakeManagedRunner) Start(context.Context) error     { return nil }
+func (f *fakeManagedRunner) Stop()                           {}
+func (f *fakeManagedRunner) Done() <-chan struct{}           { return f.done }
+func (f *fakeManagedRunner) Err() error                      { return f.err }

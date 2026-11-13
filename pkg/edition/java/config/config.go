@@ -1,0 +1,647 @@
+package config
+
+import (
+	"fmt"
+	"os"
+	"regexp"
+	"strings"
+	"time"
+
+	bconfig "go.minekube.com/gate/pkg/edition/bedrock/config"
+	liteconfig "go.minekube.com/gate/pkg/edition/java/lite/config"
+	"go.minekube.com/gate/pkg/edition/java/proto/version"
+	"go.minekube.com/gate/pkg/util/componentutil"
+	"go.minekube.com/gate/pkg/util/configutil"
+	"go.minekube.com/gate/pkg/util/favicon"
+	"go.minekube.com/gate/pkg/util/netutil"
+	"go.minekube.com/gate/pkg/util/validation"
+)
+
+// DefaultConfig is a default Config.
+var DefaultConfig = Config{
+	Bind:                               "0.0.0.0:25565",
+	OnlineMode:                         true,
+	Auth:                               Auth{},
+	OnlineModeKickExistingPlayers:      false,
+	OfflineModeUsernameBlacklistScope:  OfflineModeUsernameBlacklistScopeAll,
+	OfflineModeUsernameBlacklistReason: text("§cThis username is reserved for its authenticated owner."),
+	Forwarding: Forwarding{
+		Mode:           LegacyForwardingMode,
+		VelocitySecret: "",
+	},
+	Status: Status{
+		ShowMaxPlayers: 1000,
+		Motd:           defaultMotd(),
+		// Contains Gate's icon
+		Favicon:         "data:image/png;base64,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",
+		LogPingRequests: false,
+	},
+	Query: Query{
+		Enabled:     false,
+		Port:        25577,
+		ShowPlugins: false,
+	},
+	AnnounceForge:                        false,
+	Servers:                              map[string]string{},
+	Try:                                  []string{},
+	ForcedHosts:                          map[string][]string{},
+	FailoverOnUnexpectedServerDisconnect: true,
+	ConnectionTimeout:                    configutil.Duration(5000 * time.Millisecond),
+	ReadTimeout:                          configutil.Duration(30000 * time.Millisecond),
+	Quota: Quota{
+		Connections: QuotaSettings{
+			Enabled:    true,
+			OPS:        5,
+			Burst:      10,
+			MaxEntries: 1000,
+		},
+		Logins: QuotaSettings{
+			Enabled:    true,
+			OPS:        0.4,
+			Burst:      3,
+			MaxEntries: 1000,
+		},
+	},
+	PacketLimiter: PacketLimiter{
+		Interval:         configutil.Duration(7 * time.Second),
+		PacketsPerSecond: 500,
+		BytesPerSecond:   -1, // disabled by default; packet-rate limiting is enough for most setups
+	},
+	Compression: Compression{
+		Threshold: 256,
+		Level:     -1,
+	},
+	ProxyProtocol:                       false,
+	ProxyProtocolBackend:                false,
+	ShouldPreventClientProxyConnections: false,
+	BungeePluginChannelEnabled:          true,
+	BuiltinCommands:                     true,
+	RequireBuiltinCommandPermissions:    false,
+	AnnounceProxyCommands:               true,
+	Debug:                               false,
+	ShutdownReason:                      defaultShutdownReason(),
+	ForceKeyAuthentication:              true,
+	Lite:                                liteconfig.DefaultConfig,
+	Bedrock:                             bconfig.DefaultBedrockConfig,
+}
+
+func defaultMotd() *configutil.Component {
+	return componentText("§bA Gate Proxy\n§bVisit ➞ §fgithub.com/minekube/gate")
+}
+func defaultShutdownReason() *configutil.TextComponent {
+	return text("§cGate proxy is shutting down...\nPlease reconnect in a moment!")
+}
+
+// ResolveProxyProtocolTrustedProxies returns the configured trusted upstreams,
+// falling back to DefaultProxyProtocolTrustedProxies when none are configured.
+func ResolveProxyProtocolTrustedProxies(configured []string) []string {
+	if len(configured) == 0 {
+		return DefaultProxyProtocolTrustedProxies()
+	}
+	return configured
+}
+
+// DefaultProxyProtocolTrustedProxies returns the upstreams whose PROXY protocol
+// header is trusted when Config.ProxyProtocolTrustedProxies is empty.
+//
+// It covers the loopback, private and link-local networks a PROXY protocol
+// sender is normally deployed in (a load balancer sidecar, a Kubernetes
+// ingress, a cloud platform's internal network), but never the public internet:
+// anybody able to open a TCP connection to the proxy from a public address must
+// not be able to assert an arbitrary client IP. Operators fronting Gate with a
+// proxy that has a public address must list it explicitly.
+//
+// A new slice is returned on every call so callers cannot mutate the defaults.
+func DefaultProxyProtocolTrustedProxies() []string {
+	return []string{
+		"127.0.0.0/8",    // IPv4 loopback
+		"::1/128",        // IPv6 loopback
+		"10.0.0.0/8",     // RFC 1918 private
+		"172.16.0.0/12",  // RFC 1918 private
+		"192.168.0.0/16", // RFC 1918 private
+		"169.254.0.0/16", // IPv4 link-local
+		"fc00::/7",       // IPv6 unique local (includes Fly.io 6PN fdaa::/16)
+		"fe80::/10",      // IPv6 link-local
+	}
+}
+
+// Config is the configuration of the proxy.
+type Config struct { // TODO use https://github.com/projectdiscovery/yamldoc-go for generating output yaml and markdown for the docs
+	Bind string `yaml:"bind"` // The address to listen for connections.
+
+	OnlineMode                    bool `yaml:"onlineMode,omitempty" json:"onlineMode,omitempty"`                                       // Whether to enable online mode.
+	Auth                          Auth `yaml:"auth,omitempty" json:"auth,omitempty"`                                                   // Authentication settings.
+	OnlineModeKickExistingPlayers bool `yaml:"onlineModeKickExistingPlayers,omitempty" json:"onlineModeKickExistingPlayers,omitempty"` // Kicks existing players when a premium player with the same name joins.
+	// OfflineModeUsernameBlacklist reserves names only on login paths that are effectively
+	// offline mode. Authenticated joins remain allowed to use the same names.
+	// A login is effectively offline mode when the proxy runs offline mode or when the
+	// session's identity is an unauthenticated offline identity (e.g. an offline/cracked
+	// player arriving through Connect with the offline UUID of the requested name), so
+	// the reservation also applies on an online-mode proxy for names claimed without
+	// Mojang authentication.
+	OfflineModeUsernameBlacklist       []string                          `yaml:"offlineModeUsernameBlacklist,omitempty" json:"offlineModeUsernameBlacklist,omitempty"`
+	OfflineModeUsernameBlacklistScope  OfflineModeUsernameBlacklistScope `yaml:"offlineModeUsernameBlacklistScope,omitempty" json:"offlineModeUsernameBlacklistScope,omitempty"`
+	OfflineModeUsernameBlacklistReason *configutil.TextComponent         `yaml:"offlineModeUsernameBlacklistReason,omitempty" json:"offlineModeUsernameBlacklistReason,omitempty"`
+
+	Forwarding Forwarding `yaml:"forwarding,omitempty" json:"forwarding,omitempty"` // Player info forwarding settings.
+	Status     Status     `yaml:"status,omitempty" json:"status,omitempty"`         // Status response settings.
+	Query      Query      `yaml:"query,omitempty" json:"query,omitempty"`           // Query settings.
+	// Whether the proxy should present itself as a
+	// Forge/FML-compatible server. By default, this is disabled.
+	AnnounceForge bool `yaml:"announceForge,omitempty" json:"announceForge,omitempty"`
+
+	Servers                              map[string]string `yaml:"servers,omitempty" json:"servers,omitempty"` // name:address
+	Try                                  []string          `yaml:"try,omitempty" json:"try,omitempty"`         // Try server names order
+	ForcedHosts                          ForcedHosts       `yaml:"forcedHosts,omitempty" json:"forcedHosts,omitempty"`
+	FailoverOnUnexpectedServerDisconnect bool              `yaml:"failoverOnUnexpectedServerDisconnect,omitempty" json:"failoverOnUnexpectedServerDisconnect,omitempty"`
+
+	ConnectionTimeout configutil.Duration `yaml:"connectionTimeout,omitempty" json:"connectionTimeout,omitempty"` // Write timeout
+	ReadTimeout       configutil.Duration `yaml:"readTimeout,omitempty" json:"readTimeout,omitempty"`             // Read timeout
+
+	Quota                Quota         `yaml:"quota,omitempty" json:"quota,omitempty"`                 // Rate limiting settings
+	PacketLimiter        PacketLimiter `yaml:"packetLimiter,omitempty" json:"packetLimiter,omitempty"` // Per-connection serverbound packet rate limiting
+	Compression          Compression   `yaml:"compression,omitempty" json:"compression,omitempty"`
+	ProxyProtocol        bool          `yaml:"proxyProtocol,omitempty" json:"proxyProtocol,omitempty"`     // Enable HA-Proxy protocol mode
+	ProxyProtocolBackend bool          `yaml:"proxyProtocolBackend" json:"proxyProtocolBackend,omitempty"` // Enable HA-Proxy protocol mode for backend servers
+	// ProxyProtocolTrustedProxies lists the upstreams (IP addresses or CIDR
+	// blocks) whose PROXY protocol header is trusted to carry the real client
+	// address. A header sent by any other peer is rejected, so a client that can
+	// reach the proxy directly cannot claim to connect from somebody else's IP.
+	// When empty, DefaultProxyProtocolTrustedProxies is used.
+	// Used for client connections when ProxyProtocol is enabled; entries are still
+	// validated while it is disabled.
+	ProxyProtocolTrustedProxies []string `yaml:"proxyProtocolTrustedProxies,omitempty" json:"proxyProtocolTrustedProxies,omitempty"`
+
+	ShouldPreventClientProxyConnections bool `yaml:"shouldPreventClientProxyConnections" json:"shouldPreventClientProxyConnections,omitempty"` // Sends player IP to Mojang on login
+
+	AcceptTransfers                  bool `yaml:"acceptTransfers,omitempty" json:"acceptTransfers,omitempty"`                                   // Whether to accept transfers from other hosts via transfer packet
+	BungeePluginChannelEnabled       bool `yaml:"bungeePluginChannelEnabled,omitempty" json:"bungeePluginChannelEnabled,omitempty"`             // Whether to enable BungeeCord plugin messaging
+	BuiltinCommands                  bool `yaml:"builtinCommands,omitempty" json:"builtinCommands,omitempty"`                                   // Whether to enable builtin commands
+	RequireBuiltinCommandPermissions bool `yaml:"requireBuiltinCommandPermissions,omitempty" json:"requireBuiltinCommandPermissions,omitempty"` // Whether builtin commands require player permissions
+	AnnounceProxyCommands            bool `yaml:"announceProxyCommands,omitempty" json:"announceProxyCommands,omitempty"`                       // Whether to announce proxy commands to players
+	ForceKeyAuthentication           bool `yaml:"forceKeyAuthentication,omitempty" json:"forceKeyAuthentication,omitempty"`                     // Added in 1.19
+
+	// Permissions configures Gate's built-in, file-backed permission provider:
+	// it answers a player's PermissionsSetupEvent at login, so builtin commands
+	// can be granted per player without a Go extension (see Permissions).
+	Permissions Permissions `yaml:"permissions,omitempty" json:"permissions,omitempty"`
+
+	Debug          bool                      `yaml:"debug,omitempty" json:"debug,omitempty"` // Enable debug mode
+	ShutdownReason *configutil.TextComponent `yaml:"shutdownReason,omitempty" json:"shutdownReason,omitempty"`
+
+	Lite liteconfig.Config `yaml:"lite,omitempty" json:"lite,omitempty"` // Lite mode settings
+	Via  Via               `yaml:"via,omitempty" json:"via,omitempty"`   // Via backend compatibility settings
+
+	// Bedrock edition configuration
+	Bedrock bconfig.BedrockConfig `yaml:"bedrock,omitempty" json:"bedrock,omitempty"`
+}
+
+type (
+	// OfflineModeUsernameBlacklistScope selects which offline-mode login paths
+	// apply OfflineModeUsernameBlacklist.
+	OfflineModeUsernameBlacklistScope string
+
+	ForcedHosts map[string][]string // virtualhost:server names
+	Status      struct {
+		ShowMaxPlayers  int                   `yaml:"showMaxPlayers"`
+		Motd            *configutil.Component `yaml:"motd"`
+		Favicon         favicon.Favicon       `yaml:"favicon"`
+		LogPingRequests bool                  `yaml:"logPingRequests"`
+		// VersionName overrides the version string a client shows for this
+		// server in its server list. Empty uses "Gate <min>-<max>" built from
+		// the supported protocol versions. It changes only the display text,
+		// not which client versions Gate accepts.
+		VersionName string `yaml:"versionName,omitempty" json:"versionName,omitempty"`
+	}
+	Query struct {
+		Enabled     bool `yaml:"enabled"`
+		Port        int  `yaml:"port"`
+		ShowPlugins bool `yaml:"showPlugins"`
+	}
+	Forwarding struct {
+		Mode              ForwardingMode `yaml:"mode"`
+		VelocitySecret    string         `yaml:"velocitySecret"`    // Used with "velocity" mode
+		BungeeGuardSecret string         `yaml:"bungeeGuardSecret"` // Used with "bungeeguard" mode
+	}
+	// Via configures managed ViaLite support: Via-powered Java protocol
+	// translation for backend connections, Gate classic only. Gate accepts the
+	// player and picks a backend; ViaLite translates the backend-facing protocol
+	// when client and backend versions differ.
+	Via struct {
+		// Enabled starts the managed ViaLite runtime for backend connections.
+		Enabled bool `yaml:"enabled,omitempty" json:"enabled,omitempty"`
+		// Mode is "subprocess" (portable default) or "embedded" (in-process
+		// shared library). Empty means subprocess.
+		Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
+		// Bind is the runtime's internal loopback bind address. Empty picks a
+		// free port on 127.0.0.1.
+		Bind string `yaml:"bind,omitempty" json:"bind,omitempty"`
+		// LibraryPath uses that shared library instead of resolving one.
+		LibraryPath string `yaml:"libraryPath,omitempty" json:"libraryPath,omitempty"`
+		// BinaryPath uses that vialite binary for subprocess mode.
+		BinaryPath string `yaml:"binaryPath,omitempty" json:"binaryPath,omitempty"`
+		// Version selects the runtime release. Empty, "auto" and "latest" all
+		// mean the newest stable ViaLite release, resolved once at startup, so a
+		// newly published runtime applies on the next Gate restart (there is no
+		// hot swap). This is independent of the Go module version Gate links.
+		// With Mirror set, the mirror's own latest release is used; a mirror that
+		// cannot report one falls back to a compiled-in release and logs a
+		// warning. Set an exact tag such as "v0.3.1" to pin a rollout.
+		Version string `yaml:"version,omitempty" json:"version,omitempty"`
+		// Mirror overrides the release download base (GitHub release URL layout,
+		// optionally serving <mirror>/latest for version resolution).
+		Mirror string `yaml:"mirror,omitempty" json:"mirror,omitempty"`
+		// Offline disables runtime downloads entirely: BinaryPath/LibraryPath, an
+		// embedded artifact, or one on $PATH must be present.
+		Offline bool `yaml:"offline,omitempty" json:"offline,omitempty"`
+	}
+	Compression struct {
+		Threshold int `yaml:"threshold"`
+		Level     int `yaml:"level"`
+	}
+	// Quota is the config for rate limiting.
+	Quota struct {
+		Connections QuotaSettings `yaml:"connections"` // Limits new connections per second, per IP block.
+		Logins      QuotaSettings `yaml:"logins"`      // Limits logins per second, per IP block.
+	}
+	// PacketLimiter limits how many serverbound packets/bytes a single connection
+	// may send over a sliding window, mitigating packet floods from already
+	// connected clients (the Quota limits only apply at connect/login time).
+	// A limit <= 0 disables that dimension; if both are <= 0 the limiter is off.
+	PacketLimiter struct {
+		Interval         configutil.Duration `yaml:"interval"`         // Sliding window the rates are measured over.
+		PacketsPerSecond int                 `yaml:"packetsPerSecond"` // Max serverbound packets/s per connection (<=0 disables).
+		BytesPerSecond   int                 `yaml:"bytesPerSecond"`   // Max serverbound bytes/s per connection (<=0 disables).
+	}
+	QuotaSettings struct {
+		Enabled    bool    `yaml:"enabled"`    // If false, there is no such limiting.
+		OPS        float32 `yaml:"ops"`        // Allowed operations/events per second, per IP block
+		Burst      int     `yaml:"burst"`      // The maximum events per second, per block; the size of the token bucket
+		MaxEntries int     `yaml:"maxEntries"` // Maximum number of IP blocks to keep track of in cache
+	}
+	// Auth is the config for authentication.
+	Auth struct {
+		// SessionServerURL is the base URL for the Mojang session server to authenticate online mode players.
+		// Defaults to https://sessionserver.mojang.com/session/minecraft/hasJoined
+		SessionServerURL *configutil.URL `yaml:"sessionServerUrl"` // TODO support multiple urls configutil.SingleOrMulti[URL]
+		// PrivateKeyBits is the bit size of the RSA key Gate generates at startup to
+		// encrypt the login handshake of online mode players.
+		// Defaults to 1024 bits, the size vanilla Minecraft servers use.
+		// Raise it to 2048 or 3072 if your clients and tools accept a larger key;
+		// note the key is generated once at startup, so changing this requires a restart.
+		PrivateKeyBits int `yaml:"privateKeyBits" json:"privateKeyBits,omitempty"`
+	}
+)
+
+const (
+	// OfflineModeUsernameBlacklistScopeAll is deliberately the default for
+	// compatibility with configurations created before this setting existed.
+	OfflineModeUsernameBlacklistScopeAll OfflineModeUsernameBlacklistScope = "all"
+	// OfflineModeUsernameBlacklistScopeConnect applies the reservation only to
+	// connections created by Gate's authenticated Connect tunnel adapter.
+	OfflineModeUsernameBlacklistScopeConnect OfflineModeUsernameBlacklistScope = "connect"
+)
+
+// ForwardingMode is a player info forwarding mode.
+type ForwardingMode string
+
+const (
+	NoneForwardingMode   ForwardingMode = "none"
+	LegacyForwardingMode ForwardingMode = "legacy"
+	// VelocityForwardingMode is a forwarding mode specified by the Velocity java proxy and
+	// supported by PaperSpigot for versions starting at 1.13.
+	VelocityForwardingMode ForwardingMode = "velocity"
+	// BungeeGuardForwardingMode is a forwarding mode used by versions lower than 1.13
+	BungeeGuardForwardingMode ForwardingMode = "bungeeguard"
+)
+
+// Validate validates Config.
+func (c *Config) Validate() (warns []error, errs []error) {
+	e := func(m string, args ...any) { errs = append(errs, fmt.Errorf(m, args...)) }
+	w := func(m string, args ...any) { warns = append(warns, fmt.Errorf(m, args...)) }
+
+	if c == nil {
+		e("config must not be nil")
+		return
+	}
+
+	if strings.TrimSpace(c.Bind) == "" {
+		e("Bind is empty")
+	} else {
+		if err := validation.ValidHostPort(c.Bind); err != nil {
+			e("Invalid bind %q: %v", c.Bind, err)
+		}
+	}
+
+	for _, quota := range []QuotaSettings{c.Quota.Connections, c.Quota.Logins} {
+		if quota.Enabled {
+			if quota.OPS <= 0 {
+				e("Invalid quota ops %g, use a number > 0", quota.OPS)
+			}
+			if quota.Burst < 1 {
+				e("Invalid quota burst %d, use a number >= 1", quota.Burst)
+			}
+			if quota.MaxEntries < 1 {
+				e("Invalid quota max entries %d, use a number >= 1", quota.Burst)
+			}
+		}
+	}
+
+	if pl := c.PacketLimiter; (pl.PacketsPerSecond > 0 || pl.BytesPerSecond > 0) && pl.Interval <= 0 {
+		w("Packet limiter has a rate set but interval <= 0; the limiter is disabled. Set packetLimiter.interval > 0 to enable it.")
+	}
+
+	validateProxyProtocol(c, e, w)
+
+	validateBackendFloodgate(c, e)
+	validateOfflineModeUsernameBlacklist(c, e)
+	// Always validated, also in Lite mode: a typo must fail startup rather than
+	// silently not match once the proxy is running in full mode.
+	validatePermissions(c, e)
+	if c.Lite.Enabled {
+		warnLiteIgnoredSettings(c, w)
+		warns2, errs2 := c.Lite.Validate()
+		warns = append(warns, warns2...)
+		errs = append(errs, errs2...)
+		return
+	}
+
+	validateVia(c, e)
+	validateAuthPrivateKeyBits(c, e)
+
+	if !c.OnlineMode {
+		w("Proxy is running in offline mode!")
+	}
+
+	switch c.Forwarding.Mode {
+	case NoneForwardingMode:
+		w("Player forwarding is disabled! Backend servers will have players with " +
+			"offline-mode UUIDs and the same IP as the proxy.")
+	case LegacyForwardingMode, VelocityForwardingMode, BungeeGuardForwardingMode:
+	default:
+		e("Unknown forwarding mode %q, must be one of none,legacy,velocity,bungeeguard", c.Forwarding.Mode)
+	}
+
+	if len(c.Servers) == 0 {
+		w("No backend servers configured.")
+	}
+
+	for name, addr := range c.Servers {
+		if !validation.ValidServerName(name) {
+			e("Invalid server name format %q: %s and length be 1-%d", name,
+				validation.QualifiedNameErrMsg, validation.QualifiedNameMaxLength)
+		}
+		if err := validation.ValidHostPort(addr); err != nil {
+			e("Invalid address %q for server %q: %w", addr, name, err)
+		}
+	}
+
+	for _, name := range c.Try {
+		if _, ok := c.Servers[name]; !ok {
+			e("Fallback/try server %q must be registered under servers", name)
+		}
+	}
+
+	for host, servers := range c.ForcedHosts {
+		for _, name := range servers {
+			if _, ok := c.Servers[name]; !ok {
+				e("Forced host %q server %q must be registered under servers", host, name)
+			}
+		}
+	}
+
+	if c.Compression.Level < -1 || c.Compression.Level > 9 {
+		e("Unsupported compression level %d: must be -1..9", c.Compression.Level)
+	} else if c.Compression.Level == 0 {
+		w("All packets going through the proxy will are uncompressed, this increases bandwidth usage.")
+	}
+
+	if c.Compression.Threshold < -1 {
+		e("Invalid compression threshold %d: must be >= -1", c.Compression.Threshold)
+	} else if c.Compression.Threshold == 0 {
+		w("All packets going through the proxy will be compressed, this lowers bandwidth, " +
+			"but has lower throughput and increases CPU usage.")
+	}
+
+	return
+}
+
+var minecraftUsernamePattern = regexp.MustCompile(`^[A-Za-z0-9_]{2,16}$`)
+
+func validateOfflineModeUsernameBlacklist(c *Config, e func(string, ...any)) {
+	switch c.OfflineModeUsernameBlacklistScope {
+	case "", OfflineModeUsernameBlacklistScopeAll, OfflineModeUsernameBlacklistScopeConnect:
+		// An omitted key is "all", preserving pre-scope behaviour.
+	default:
+		e("Invalid offlineModeUsernameBlacklistScope %q, must be one of all,connect", c.OfflineModeUsernameBlacklistScope)
+	}
+
+	seen := make(map[string]string, len(c.OfflineModeUsernameBlacklist))
+	for _, username := range c.OfflineModeUsernameBlacklist {
+		if !minecraftUsernamePattern.MatchString(username) {
+			e("Invalid offlineModeUsernameBlacklist entry %q: use a 2-16 character Minecraft username", username)
+			continue
+		}
+		folded := strings.ToLower(username)
+		if previous, exists := seen[folded]; exists {
+			e("Duplicate offlineModeUsernameBlacklist entries %q and %q are case-insensitively identical", previous, username)
+			continue
+		}
+		seen[folded] = username
+	}
+}
+
+// warnLiteIgnoredSettings warns about full proxy settings that Lite mode ignores.
+//
+// Lite pipes the player connection through to the backend unchanged, so Gate never takes
+// part in login, player info forwarding, compression or answering status requests. Accepting
+// these settings without a word is the cause of https://github.com/minekube/gate/issues/929.
+// Settings left at their default are not reported, only ones an operator deliberately set.
+func warnLiteIgnoredSettings(c *Config, w func(string, ...any)) {
+	f := c.Forwarding
+	forwardingConfigured := f.VelocitySecret != "" || f.BungeeGuardSecret != ""
+	switch f.Mode {
+	case "", NoneForwardingMode, LegacyForwardingMode:
+		// legacy is the default mode, so staying quiet keeps every Lite config warning-free.
+	default:
+		// velocity, bungeeguard and typos alike: all of them are inert in Lite mode.
+		forwardingConfigured = true
+	}
+	if forwardingConfigured {
+		w("Lite mode ignores player info forwarding (forwarding.mode %q, velocitySecret, "+
+			"bungeeGuardSecret): Lite pipes the connection through unchanged, so Gate never "+
+			"sends player info to the backend. Backends that require it, such as modded servers "+
+			"with FabricProxy-Lite or Proxy-Compatible-Forge, reject players with "+
+			`"you need to be running velocity, or a velocity proxy with modern forwarding". `+
+			"Either configure the backend to not require proxy forwarding, or disable "+
+			"lite.enabled and route with servers/try instead. "+
+			"See https://gate.minekube.com/guide/modded-servers", f.Mode)
+	}
+
+	if len(c.Servers) != 0 || len(c.Try) != 0 || len(c.ForcedHosts) != 0 {
+		w("Lite mode ignores servers, try and forcedHosts: use lite.routes to route " +
+			"connections. See https://gate.minekube.com/guide/lite")
+	}
+
+	if !c.OnlineMode {
+		w("Lite mode ignores onlineMode: Lite forwards the login to the backend, which " +
+			"authenticates players itself, so set online-mode in the backend's server.properties.")
+	}
+
+	if c.Compression != DefaultConfig.Compression {
+		w("Lite mode ignores compression: Gate does not decode packets in Lite mode, " +
+			"the client and the backend negotiate compression between themselves.")
+	}
+
+	if c.AnnounceForge {
+		w("Lite mode ignores announceForge: status responses are proxied from the backend, " +
+			"which announces its own mods.")
+	}
+
+	if len(c.OfflineModeUsernameBlacklist) != 0 {
+		w("Lite mode ignores offlineModeUsernameBlacklist: Lite forwards login unchanged, so configure username protection on the backend or disable lite.enabled.")
+	}
+
+	if c.Auth.PrivateKeyBits != 0 {
+		w("Lite mode ignores auth.privateKeyBits: Lite forwards the login to the backend, so " +
+			"Gate never generates a login key. Configure the key size on the backend instead.")
+	}
+
+	if !c.Permissions.Empty() {
+		w("Lite mode ignores permissions: Lite pipes the connection through unchanged, so " +
+			"Gate never applies config.permissions. Configure permissions on the backend or disable lite.enabled.")
+	}
+}
+
+// validateProxyProtocol validates the trusted upstreams allowed to send a PROXY
+// protocol header. The list is always validated, even while proxyProtocol is
+// disabled, so a typo is not only discovered once the feature is turned on.
+func validateProxyProtocol(c *Config, e, w func(string, ...any)) {
+	trusted, err := netutil.ParseTrustedNetworks(ResolveProxyProtocolTrustedProxies(c.ProxyProtocolTrustedProxies))
+	if err != nil {
+		e("Invalid proxyProtocolTrustedProxies: %v", err)
+		return
+	}
+	if !c.ProxyProtocol {
+		return
+	}
+	for _, prefix := range trusted {
+		if prefix.Bits() == 0 {
+			w("proxyProtocolTrustedProxies contains %s which trusts every upstream: "+
+				"anyone able to connect to %s can then claim to be any IP address. "+
+				"List only the proxies in front of Gate.", prefix, c.Bind)
+		}
+	}
+}
+
+func validateBackendFloodgate(c *Config, e func(string, ...any)) {
+	backendFloodgate := c.Bedrock.BackendFloodgate
+	if !backendFloodgate.Enabled {
+		return
+	}
+	if !c.Bedrock.Enabled {
+		e("bedrock.backendFloodgate requires bedrock.enabled")
+	}
+	if len(backendFloodgate.AllowedServers) == 0 {
+		e("bedrock.backendFloodgate.allowedServers must not be empty")
+	}
+
+	servers := make(map[string]struct{}, len(c.Servers))
+	for name := range c.Servers {
+		servers[strings.ToLower(name)] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(backendFloodgate.AllowedServers))
+	for _, name := range backendFloodgate.AllowedServers {
+		if !validation.ValidServerName(name) {
+			e("Invalid bedrock.backendFloodgate.allowedServers server name %q: %s and length be 1-%d", name,
+				validation.QualifiedNameErrMsg, validation.QualifiedNameMaxLength)
+			continue
+		}
+		normalized := strings.ToLower(name)
+		if _, ok := seen[normalized]; ok {
+			e("Duplicate bedrock.backendFloodgate.allowedServers server %q", name)
+			continue
+		}
+		seen[normalized] = struct{}{}
+		if _, ok := servers[normalized]; !ok {
+			e("bedrock.backendFloodgate.allowedServers server %q must be registered under servers", name)
+		}
+	}
+
+	switch c.Forwarding.Mode {
+	case NoneForwardingMode, VelocityForwardingMode:
+	case LegacyForwardingMode, BungeeGuardForwardingMode:
+		e("bedrock.backendFloodgate is incompatible with forwarding.mode %q", c.Forwarding.Mode)
+	default:
+		e("bedrock.backendFloodgate requires forwarding.mode none or velocity, got %q", c.Forwarding.Mode)
+	}
+
+	bedrockConfig := c.Bedrock.ToConfig()
+	if bedrockConfig.FloodgateKeyPath == "" {
+		e("bedrock.backendFloodgate requires readable floodgateKeyPath")
+		return
+	}
+	if _, err := os.ReadFile(bedrockConfig.FloodgateKeyPath); err != nil {
+		if os.IsNotExist(err) && bedrockConfig.GetManaged().Enabled {
+			return
+		}
+		e("bedrock.backendFloodgate requires readable floodgateKeyPath %q: %v", bedrockConfig.FloodgateKeyPath, err)
+	}
+}
+
+func validateVia(c *Config, e func(string, ...any)) {
+	if !c.Via.Enabled {
+		return
+	}
+	switch c.Via.Mode {
+	case "", "embedded", "subprocess":
+	default:
+		e("Unknown via mode %q, must be one of embedded,subprocess", c.Via.Mode)
+	}
+	if c.Via.Bind != "" {
+		if err := validation.ValidHostPort(c.Via.Bind); err != nil {
+			e("Invalid via bind %q: %v", c.Via.Bind, err)
+		}
+	}
+}
+
+// Bounds for the operator-configurable login RSA key size. The lower bound is
+// crypto/rsa's own minimum (rsa.GenerateKey rejects anything smaller); the
+// upper bound keeps a typo from stalling startup with an enormous key
+// generation. auth.DefaultPrivateKeyBits stays the default.
+const (
+	MinPrivateKeyBits = 1024
+	MaxPrivateKeyBits = 8192
+)
+
+// validateAuthPrivateKeyBits rejects auth.privateKeyBits values that cannot
+// produce a usable login key, so a misconfiguration fails at config load
+// instead of at key generation (or silently, as before the setting existed).
+// Unset (0) is valid and means the built-in default.
+func validateAuthPrivateKeyBits(c *Config, e func(string, ...any)) {
+	bits := c.Auth.PrivateKeyBits
+	if bits == 0 {
+		return
+	}
+	if bits < MinPrivateKeyBits || bits > MaxPrivateKeyBits {
+		e("Invalid auth.privateKeyBits %d, must be between %d and %d (or unset for the default)",
+			bits, MinPrivateKeyBits, MaxPrivateKeyBits)
+	}
+}
+
+func text(s string) *configutil.TextComponent {
+	return (*configutil.TextComponent)(must(componentutil.ParseTextComponent(
+		version.MinimumVersion.Protocol, s)))
+}
+
+func componentText(s string) *configutil.Component {
+	return &configutil.Component{Value: must(componentutil.ParseComponent(
+		version.MaximumVersion.Protocol, s))}
+}
+
+func must[T any](t T, err error) T {
+	if err != nil {
+		panic(err)
+	}
+	return t
+}

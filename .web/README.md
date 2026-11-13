@@ -1,0 +1,91 @@
+# Documentation Website
+
+This website is built using [Vitepress](https://vitepress.vuejs.org/),
+a modern static website generator for documentation.
+
+## Setup
+
+> You must have Node.js 22+ and pnpm 10.34.5 installed.
+> You may use [Volta](https://github.com/volta-cli/volta), a Node version manager,
+> to install Node.js and `pnpm`.
+
+```sh console
+$ curl https://get.volta.sh | bash
+$ volta install node@22 pnpm@10.34.5
+```
+
+### Installation
+
+Finally, you will need to install the Node.js dependencies for this project
+using pnpm:
+
+```sh console
+$ pnpm install
+```
+
+### Local Development
+
+```sh console
+$ pnpm run dev
+```
+
+This command starts a local development server and opens up a browser window.
+Most changes are reflected live without having to restart the server.
+
+### Lint
+
+```sh console
+$ pnpm run lint
+```
+
+The docs site source, the build/deploy scripts and the Worker
+(`worker.mjs`, `worker-response.mjs`, `functions/**`) are linted with
+[Biome](https://biomejs.dev). `biome.jsonc` holds the rule set and the analysed
+scope. Generated mermaid exports under `docs/`, the standalone example projects
+in `docs/developers/` and the static assets in `docs/public/` are excluded
+there, each with the reason why. The `web` workflow runs this check - together
+with `pnpm run test` and `pnpm run build` - for every change under `.web/`.
+
+### Build
+
+```sh console
+$ pnpm run build
+```
+
+This command generates static content into `docs/.vitepress/dist` and can be
+served using any static content hosting service.
+
+### Deployment
+
+Our docs are deployed as Cloudflare Workers Static Assets. The isolated canary
+uses `wrangler.canary.jsonc` and the `gate-docs-canary.minekube.com` custom
+domain. The production configuration in `wrangler.jsonc` attaches the
+`gate.minekube.com` custom domain; deploy it only after canary verification
+passes.
+
+The previous Cloudflare Pages deployment remains available as the rollback
+target until the Worker is verified in production.
+
+The Worker marks HTML and custom 404 responses `no-store` so a deployment
+cannot leave an old HTML shell pointing at retired content-hashed assets.
+Hashed static assets retain the cache policy supplied by Workers Static Assets.
+
+Worker deployments use the pinned Wrangler toolchain. Set
+`GITHUB_CACHE_KV_NAMESPACE_ID` to the existing `GITHUB_CACHE` Workers KV
+namespace ID in the deployment environment. Before the first uncached API
+request, provision the existing GitHub App private key as a secret on each
+Worker. GitHub downloads App keys in PKCS#1 format, while the Worker auth
+library requires PKCS#8. Convert the key in a private directory, keep both
+files outside the repository, and restrict the converted copy to its owner:
+
+```sh console
+$ umask 077
+$ openssl pkcs8 -topk8 -nocrypt -in github-app-key.pem -out github-app-key-pkcs8.pem
+$ chmod 600 github-app-key-pkcs8.pem
+$ pnpm exec wrangler secret put GITHUB_APP_PRIVATE_KEY --config wrangler.canary.jsonc < github-app-key-pkcs8.pem
+$ pnpm exec wrangler secret put GITHUB_APP_PRIVATE_KEY --config wrangler.jsonc < github-app-key-pkcs8.pem
+```
+
+Then run `pnpm run build:worker` followed by
+`pnpm run deploy:worker:canary`.
+The production command is `pnpm run deploy:worker`.

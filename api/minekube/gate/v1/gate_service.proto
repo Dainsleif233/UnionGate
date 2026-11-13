@@ -1,0 +1,356 @@
+syntax = "proto3";
+
+package minekube.gate.v1;
+
+option go_package = "go.minekube.com/gate/pkg/internal/api/gen/minekube/gate/v1;gatev1";
+
+// GateService is the service API for managing a Gate proxy instance.
+// It provides methods for managing players and servers.
+// All methods follow standard gRPC error codes and include detailed error messages.
+service GateService {
+  // GetPlayer returns the player by the given id or username.
+  // Returns NOT_FOUND if the player is not online.
+  // Returns INVALID_ARGUMENT if neither id nor username is provided, or if the id format is invalid.
+  rpc GetPlayer(GetPlayerRequest) returns (GetPlayerResponse);
+
+  // ListPlayers returns all online players.
+  // If servers are specified in the request, only returns players on those servers.
+  rpc ListPlayers(ListPlayersRequest) returns (ListPlayersResponse);
+
+  // ListServers returns all registered servers.
+  rpc ListServers(ListServersRequest) returns (ListServersResponse);
+
+  // RegisterServer adds a server to the proxy.
+  // Returns ALREADY_EXISTS if a server with the same name is already registered.
+  // Returns INVALID_ARGUMENT if the server name or address is invalid.
+  rpc RegisterServer(RegisterServerRequest) returns (RegisterServerResponse);
+
+  // UnregisterServer removes a server from the proxy.
+  // Returns NOT_FOUND if no matching server is found.
+  // Returns INVALID_ARGUMENT if neither name nor address is provided.
+  rpc UnregisterServer(UnregisterServerRequest) returns (UnregisterServerResponse);
+
+  // ConnectPlayer connects a player to a specified server.
+  // Returns NOT_FOUND if either the player or target server doesn't exist.
+  // Returns FAILED_PRECONDITION if the connection attempt fails.
+  rpc ConnectPlayer(ConnectPlayerRequest) returns (ConnectPlayerResponse);
+
+  // DisconnectPlayer disconnects a player from the proxy.
+  // Returns NOT_FOUND if the player doesn't exist.
+  // Returns INVALID_ARGUMENT if the reason text is malformed.
+  rpc DisconnectPlayer(DisconnectPlayerRequest) returns (DisconnectPlayerResponse);
+
+  // StoreCookie stores a cookie on a player's client.
+  // Returns NOT_FOUND if the player doesn't exist.
+  // Passing an empty payload will remove the cookie.
+  rpc StoreCookie(StoreCookieRequest) returns (StoreCookieResponse);
+
+  // RequestCookie requests a cookie from a player's client.
+  // The payload in RequestCookieResponse may be empty if the cookie is not found.
+  rpc RequestCookie(RequestCookieRequest) returns (RequestCookieResponse);
+
+  // GetStatus returns current proxy metadata including version, mode, players and servers.
+  rpc GetStatus(GetStatusRequest) returns (GetStatusResponse);
+
+  // GetConfig returns the current effective config.
+  rpc GetConfig(GetConfigRequest) returns (GetConfigResponse);
+
+  // ValidateConfig parses and validates a config payload without applying it.
+  rpc ValidateConfig(ValidateConfigRequest) returns (ValidateConfigResponse);
+
+  // ApplyConfig parses, validates, and applies a new config payload.
+  rpc ApplyConfig(ApplyConfigRequest) returns (ApplyConfigResponse);
+
+}
+
+// StoreCookieRequest is the request for StoreCookie method.
+message StoreCookieRequest {
+  // The player's username or ID
+  string player = 1;
+  // The key of the cookie in format `namespace:key`
+  string key = 2;
+  // The payload to store.
+  // Passing an empty payload will remove the cookie.
+  bytes payload = 3;
+}
+
+// StoreCookieResponse is the response for StoreCookie method.
+message StoreCookieResponse {}
+
+// RequestCookieRequest is the request for RequestCookie method.
+message RequestCookieRequest {
+  // The player's username or ID
+  string player = 1;
+  // The key of the cookie in format `namespace:key`
+  string key = 2;
+}
+
+// RequestCookieResponse is the response for RequestCookie method.
+message RequestCookieResponse {
+  // The payload of the cookie.
+  // May be empty if the cookie is not found.
+  bytes payload = 1;
+}
+
+// DisconnectPlayerRequest is the request for DisconnectPlayer method.
+message DisconnectPlayerRequest {
+  // The player's username or ID to disconnect
+  string player = 1;
+  // The reason displayed to the player when they are disconnected.
+  //
+  // Formats:
+  //
+  // - `{"text":"Hello, world!"}` - JSON text component. See https://wiki.vg/Text_formatting for details.
+  //
+  // - `§aHello,\n§bworld!` - Simple color codes. See https://wiki.vg/Text_formatting#Colors
+  //
+  // Optional, if empty no reason will be shown.
+  string reason = 2;
+}
+
+// DisconnectPlayerResponse is the response for DisconnectPlayer method.
+message DisconnectPlayerResponse {}
+
+// ConnectPlayerRequest is the request for ConnectPlayer method.
+message ConnectPlayerRequest {
+  // The player's username or ID to connect
+  string player = 1;
+  // The target server name to connect the player to
+  string server = 2;
+}
+
+// ConnectPlayerResponse is the response for ConnectPlayer method.
+message ConnectPlayerResponse {}
+
+// RegisterServerRequest is the request for RegisterServer method.
+message RegisterServerRequest {
+  // The unique name of the server
+  string name = 1;
+  // The network address of the server (e.g. "localhost:25565")
+  string address = 2;
+}
+
+// RegisterServerResponse is the response for RegisterServer method.
+message RegisterServerResponse {}
+
+// UnregisterServerRequest is the request for UnregisterServer method.
+message UnregisterServerRequest {
+  // The name of the server.
+  // Optional, if not set, the address will be used to match servers.
+  string name = 1;
+
+  // The address of the server.
+  // Optional, if not set, the name will be used to match servers.
+  // If both name and address are set, only the server that matches both properties exactly will be unregistered.
+  // If only the address is set, the first server matching that address will be unregistered.
+  string address = 2;
+}
+
+// UnregisterServerResponse is the response for UnregisterServer method.
+message UnregisterServerResponse {}
+
+// ListServersRequest is the request for ListServers method.
+message ListServersRequest {}
+
+// ListServersResponse is the response for ListServers method.
+message ListServersResponse {
+  repeated Server servers = 1;
+}
+
+// Server represents a backend server where Gate can connect players to.
+message Server {
+  // The unique name of the server.
+  string name = 1;
+  // The network address of the server.
+  string address = 2;
+  // The number of players currently on the server.
+  int32 players = 3;
+}
+
+// GetPlayerRequest is the request for GetPlayer method.
+message GetPlayerRequest {
+  // Gets the player by their Minecraft UUID.
+  // Optional, if not set the username will be used.
+  // If both id and username are set, the id will be used.
+  // Must be a valid Minecraft UUID format (e.g. "550e8400-e29b-41d4-a716-446655440000")
+  string id = 1;
+  // Gets the player by their username.
+  // Optional, if not set the id will be used.
+  // Case-sensitive.
+  string username = 2;
+}
+
+// GetPlayerResponse is the response for GetPlayer method.
+message GetPlayerResponse {
+  // The player matching the request criteria
+  Player player = 1;
+}
+
+// ListPlayersRequest is the request for ListPlayers method.
+message ListPlayersRequest {
+  // Filter players by server names.
+  // Optional, if empty all online players are returned.
+  // If specified, only returns players on the listed servers.
+  repeated string servers = 1;
+}
+
+// ListPlayersResponse is the response for ListPlayers method.
+message ListPlayersResponse {
+  repeated Player players = 1;
+}
+
+// Player represents an online player on the proxy.
+message Player {
+  // The player's Minecraft UUID
+  string id = 1;
+  // The player's username
+  string username = 2;
+  // Optional Bedrock player data (only present for Bedrock players)
+  BedrockPlayerData bedrock = 3;
+}
+
+// BedrockPlayerData contains information specific to Bedrock Edition players.
+// This data is only available for players connecting through Geyser/Floodgate.
+message BedrockPlayerData {
+  // Xbox User ID (XUID) - unique identifier for Bedrock players
+  int64 xuid = 1;
+  // Device operating system the player is using
+  BedrockDeviceOS device_os = 2;
+  // Client language code (e.g., "en_US")
+  string language = 3;
+  // UI profile (Classic or Pocket)
+  BedrockUIProfile ui_profile = 4;
+  // Input method (mouse, touch, gamepad, etc.)
+  BedrockInputMode input_mode = 5;
+  // Whether the player is connecting through a proxy
+  bool behind_proxy = 6;
+  // Linked Java Edition username (if any)
+  string linked_player = 7;
+}
+
+// GetStatusRequest is the request for GetStatus method.
+message GetStatusRequest {}
+
+// ProxyMode enumerates the current operating mode of Gate.
+enum ProxyMode {
+  PROXY_MODE_UNSPECIFIED = 0;
+  PROXY_MODE_CLASSIC = 1;
+  PROXY_MODE_LITE = 2;
+}
+
+// BedrockDeviceOS represents the operating system of a Bedrock Edition player's device.
+enum BedrockDeviceOS {
+  BEDROCK_DEVICE_OS_UNSPECIFIED = 0;
+  BEDROCK_DEVICE_OS_UNKNOWN = 1;
+  BEDROCK_DEVICE_OS_ANDROID = 2;
+  BEDROCK_DEVICE_OS_IOS = 3;
+  BEDROCK_DEVICE_OS_MACOS = 4;
+  BEDROCK_DEVICE_OS_AMAZON = 5;
+  BEDROCK_DEVICE_OS_GEAR_VR = 6;
+  BEDROCK_DEVICE_OS_HOLOLENS = 7;     // Deprecated
+  BEDROCK_DEVICE_OS_WINDOWS_UWP = 8;
+  BEDROCK_DEVICE_OS_WINDOWS_X86 = 9;
+  BEDROCK_DEVICE_OS_DEDICATED = 10;
+  BEDROCK_DEVICE_OS_APPLE_TV = 11;    // Deprecated
+  BEDROCK_DEVICE_OS_PLAYSTATION = 12;
+  BEDROCK_DEVICE_OS_SWITCH = 13;
+  BEDROCK_DEVICE_OS_XBOX = 14;
+  BEDROCK_DEVICE_OS_WINDOWS_PHONE = 15; // Deprecated
+  BEDROCK_DEVICE_OS_LINUX = 16;
+}
+
+// BedrockInputMode represents the input method used by a Bedrock Edition player.
+enum BedrockInputMode {
+  BEDROCK_INPUT_MODE_UNSPECIFIED = 0;
+  BEDROCK_INPUT_MODE_UNKNOWN = 1;
+  BEDROCK_INPUT_MODE_MOUSE = 2;
+  BEDROCK_INPUT_MODE_TOUCH = 3;
+  BEDROCK_INPUT_MODE_GAMEPAD = 4;
+  BEDROCK_INPUT_MODE_MOTION_CONTROLLER = 5;
+}
+
+// BedrockUIProfile represents the UI profile used by a Bedrock Edition player.
+enum BedrockUIProfile {
+  BEDROCK_UI_PROFILE_UNSPECIFIED = 0;
+  BEDROCK_UI_PROFILE_CLASSIC = 1;
+  BEDROCK_UI_PROFILE_POCKET = 2;
+}
+
+// GetStatusResponse contains proxy runtime metadata.
+message GetStatusResponse {
+  // Gate version string
+  string version = 1;
+  // Current operating mode (classic or lite)
+  ProxyMode mode = 2;
+  // Mode-specific statistics
+  oneof stats {
+    // Statistics for classic mode
+    ClassicStats classic = 3;
+    // Statistics for lite mode
+    LiteStats lite = 4;
+  }
+}
+
+// ClassicStats contains statistics for classic proxy mode.
+message ClassicStats {
+  // Number of online players
+  int32 players = 1;
+  // Number of registered servers
+  int32 servers = 2;
+}
+
+// LiteStats contains statistics for lite proxy mode.
+message LiteStats {
+  // Number of active connections being proxied
+  int32 connections = 1;
+  // Number of configured routes
+  int32 routes = 2;
+}
+
+
+// GetConfigRequest is the request for GetConfig method.
+message GetConfigRequest {}
+
+// GetConfigResponse contains the serialized config payload.
+message GetConfigResponse {
+  // YAML-serialized configuration data
+  string payload = 1;
+  // Opaque version of the effective configuration, used as an ETag.
+  string version = 2;
+}
+
+// ValidateConfigRequest is the request for ValidateConfig method.
+// The config payload is parsed with a YAML decoder (which supports JSON as YAML is a superset).
+message ValidateConfigRequest {
+  // Configuration data as YAML or JSON string
+  string config = 1;
+}
+
+// ValidateConfigResponse contains validation results when the config is processed.
+message ValidateConfigResponse {
+  repeated string warnings = 1;
+  repeated string errors = 2;
+}
+
+// ApplyConfigRequest is the request for ApplyConfig method.
+// The config payload is parsed with a YAML decoder (which supports JSON as YAML is a superset).
+message ApplyConfigRequest {
+  oneof input {
+    // Complete configuration data as a YAML or JSON string.
+    string config = 1;
+    // RFC 7396 JSON Merge Patch applied to the current configuration.
+    string merge_patch = 3;
+  }
+  // Whether to persist the config to disk by overwriting the existing config file.
+  // Only works if a config file exists. Defaults to false (in-memory only).
+  bool persist = 2;
+  // Version returned by GetConfig. The apply is rejected when it is stale.
+  string if_match = 4;
+}
+
+// ApplyConfigResponse contains validation warnings emitted while applying the config.
+message ApplyConfigResponse {
+  repeated string warnings = 1;
+  // Version of the effective configuration after the apply.
+  string version = 2;
+}
